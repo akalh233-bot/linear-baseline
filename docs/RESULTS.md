@@ -1,17 +1,17 @@
 # Results
 
-Two worlds are reported here, in this order: the **real-data** arm (the reason
-the repository exists) and the **synthetic** smoke world (a plumbing test).
-
-Every real-data number below is the committed output of
+One arm is reported here: the **real-data** full-bio CRE→gene baseline. It is
+the reason the repository exists, and every number below is the committed
+output of
 
 ```bash
-linearbaseline fullbio --data data/fullbio/features.npz --out results
+linearbaseline fullbio --config configs/fullbio.json --out results
 ```
 
-→ `results/fullbio_loco.json`. Runtime ~5.5 s on CPU.
+→ `results/fullbio_loco.json`. Runtime ~6 s on CPU, 1,000 gene-cluster
+resamples included.
 
-## 1. Real data: EPCrisprBenchmark K562, CRE→gene
+## 1. EPCrisprBenchmark K562, CRE→gene
 
 * 10,356 candidate (CRE, gene) pairs, **471 positives** (4.55%).
 * 23 chromosomes held out one at a time (**LOCO**); 2,113 genes.
@@ -47,9 +47,9 @@ By CRE→TSS distance:
    ATAC + sequence** (measured earlier in the project with a Ridge proxy:
    +0.0013 of +0.0208). Dropping the ChIP data and accepting 0.6507 is the
    defensible deployable choice.
-4. **CIs are gene-level.** With 2.2 pairs per gene on average the interval is
-   only modestly wider than a row bootstrap, but for genes with many candidate
-   CREs the difference is large; the CI above is the conservative one.
+4. **CIs are gene-level.** 4.9 pairs per gene on average, and pairs of one gene
+   share the gene-side, expression and neighbourhood columns, so a row-level
+   bootstrap would understate the interval. The CI above resamples genes.
 5. **This is one cell line and one label system.** No cross-cell-state claim is
    made. The marks in a different cell type would have to be re-measured.
 
@@ -61,34 +61,12 @@ Holding out an entire chromosome removes that shortcut. The price is a noisier
 estimate (23 folds, some with very few positives), which is why the headline
 also carries a bootstrap interval.
 
-## 2. Synthetic smoke world (pipeline check only)
-
-```bash
-linearbaseline synthetic --out data/synthetic.npz
-linearbaseline train     --config configs/synthetic.json --out results
-linearbaseline ablations --config configs/synthetic.json --out results
-```
-
-World: 4,000 loci × 2 rows, 200 bp, motif dosage 1–9 per locus, prevalence
-0.380. Split by locus 3,200/800; `C` by 5 grouped folds over {0.01, 0.1, 1, 10}.
-
-| arm | features | C | AP | AUC | log-loss |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| majority | 0 | – | 0.3663 | – | 0.6575 |
-| distance-only | 4 | 0.01 | 0.3845 | 0.5239 | 0.6568 |
-| k-mer only | 64 | 0.01 | 0.7599 | 0.8533 | 0.4555 |
-| k-mer + distance | 68 | 0.01 | 0.7626 | 0.8548 | 0.4537 |
-| full | 80 | 0.1 | 0.7596 | 0.8543 | 0.4550 |
-
-Main arm: AP 0.7596, locus-bootstrap 95% CI [0.7125, 0.8000], 1,000 resamples.
-
-These numbers prove the plumbing (splits, metrics, CI, CLI). They are **not**
-evidence about any real dataset, and they must never be quoted as such.
-
-## 3. Rules for adding a row
+## 2. Rules for adding a row
 
 1. One row per dataset version; record the `.npz` SHA-256 in `run.json`.
-2. The CI is cluster-level (locus or gene), 1,000 resamples minimum.
+2. The CI is cluster-level (gene or chromosome), 1,000 resamples minimum.
 3. Report the split seed and the number of held-out clusters.
 4. Never compare numbers across different negative-sampling schemes.
 5. If the label is distance-dominated, report the distance-only arm first.
+6. A change in the feature set must change the column count (asserted by a
+   test) or the `docs/DATA.md` SHA-256 — never silently.

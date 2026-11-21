@@ -101,13 +101,16 @@
       "100kb-1Mb": 0.019970423874981658
     }
   },
-  "seconds": 7.61,
+  "seconds": 8.54,
   "versions": {
+    "package": "0.2.0",
     "python": "3.13.9",
     "numpy": "2.3.5",
     "command": [
-      "E:\\triomics\\linear-baseline\\src\\linearbaseline\\cli.py",
+      "linearbaseline",
       "fullbio",
+      "--config",
+      "configs/fullbio.json",
       "--out",
       "results"
     ]

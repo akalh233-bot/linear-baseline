@@ -12,8 +12,7 @@ of H3K27ac/CTCF/H3K4me1/H3K27me3 ChIP data for this task.
 
 > 中文摘要：这是把 `phase3/realdata` 里那条 full-bio 逻辑回归正式打包成仓库。
 > 主结果：LOCO AP **0.6715**，去掉 9 个实测标记后 **0.6507**；距离 <20 kb 的
-> 子集 0.8327，而 100 kb–1 Mb 只有 0.2763。仓库里同时保留一个合成世界，
-> 只用来做 CI 冒烟，不作为任何生物学结论。
+> 子集 0.8327，而 100 kb–1 Mb 只有 0.2763；只给距离时远端只有 0.0186。
 
 ---
 
@@ -53,20 +52,16 @@ not rows: two candidate CREs of one gene are not independent evidence.
 ```bash
 python -m pip install -e ".[dev]"
 
-# real-data arm: LOCO CV + gene-cluster bootstrap  (~6 s)
-linearbaseline fullbio --data data/fullbio/features.npz --out results
-
-# synthetic smoke world (pipeline check only)
-linearbaseline synthetic --out data/synthetic.npz
-linearbaseline train     --config configs/synthetic.json --out results
-linearbaseline ablations --config configs/synthetic.json --out results
+# the arm: LOCO CV + gene-cluster bootstrap  (~6 s)
+linearbaseline fullbio --config configs/fullbio.json --out results
 
 pytest -q
 ```
 
-`results/fullbio_loco.json` in this repository is the committed output of the
-first command; it contains every number above plus the per-bin sample sizes, so
-the README cannot drift from the code without a test failing.
+`results/fullbio_loco.json` in this repository is the committed output of that
+command; it contains every number above plus the per-bin sample sizes, and
+`tests/test_fullbio.py::test_readme_matches_committed_results` fails if the
+README drifts from it.
 
 ## The packaged design matrix
 
@@ -91,22 +86,6 @@ chromosomes and applied to the held-out one. Nothing about the test chromosome �
 not even a column median — enters the fit. `docs/DATA.md` documents provenance
 and the exact upstream files.
 
-## Synthetic smoke world
-
-To keep CI hermetic, the repo also ships a generator whose label is known
-(4000 loci × 2 rows, 200 bp, seed 0). It is a plumbing test, not biology:
-
-| arm | features | AP | AUC |
-| --- | ---: | ---: | ---: |
-| majority | 0 | 0.3663 | – |
-| distance-only | 4 | 0.3845 | 0.5239 |
-| k-mer only | 64 | 0.7599 | 0.8533 |
-| k-mer + distance | 68 | 0.7626 | 0.8548 |
-| full | 80 | 0.7596 | 0.8543 |
-
-Distance-only sitting at chance here is the point: in the toy world the label is
-motif dosage, so a feature that dominates real CRE–gene data buys nothing.
-
 ## Design decisions
 
 * **Leave-one-chromosome-out, not random locus splits.** Random locus splits
@@ -119,15 +98,16 @@ motif dosage, so a feature that dominates real CRE–gene data buys nothing.
   training chromosomes only is what makes the 26 columns stable.
 * **AP, not accuracy, as the headline.** Positives are 4.55% of pairs; the
   decision threshold is not meaningful until calibration is done.
-* **Ablations are shipped, not implied.** The nine mark columns are the only
-  block that can be removed without re-deriving raw data, so the repository
-  reports that ablation as a first-class arm rather than an afterthought.
+* **Arms are shipped, not implied.** The nested P0 / P1 / D0 arms are the only
+  comparisons the repository makes: what the marks buy, and what distance alone
+  buys. Ablations that need re-derived raw data are left to a paper, where they
+  can carry their own provenance.
 
 ## Status
 
 - [x] real-data full-bio arm (LOCO, gene-cluster CI, marks ablation)
 - [x] packaged 3.4 MB design matrix + provenance doc
-- [x] synthetic smoke world, unit + end-to-end tests, GitHub Actions CI
+- [x] unit tests + GitHub Actions CI (the fullbio arm runs end-to-end)
 - [ ] probability calibration (isotonic / Platt) and ECE reporting
 - [ ] head-to-head table against a CNN / distilled student on the same splits
 - [ ] cross-cell-state arm (needs matched labels; not yet available)

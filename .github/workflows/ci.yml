@@ -25,11 +25,9 @@ jobs:
           pip install -e ".[dev]"
       - name: Unit tests
         run: pytest -q
-      - name: End-to-end smoke run
+      - name: End-to-end run (fullbio arm)
         run: |
-          linearbaseline synthetic --out data/synthetic.npz --loci 1500
-          linearbaseline train --config configs/synthetic.json --out results
-          linearbaseline ablations --config configs/synthetic.json --out results
+          linearbaseline fullbio --config configs/fullbio.json --out results
       - name: Upload results
         uses: actions/upload-artifact@v4
         with:

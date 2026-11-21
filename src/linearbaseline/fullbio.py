@@ -1,11 +1,10 @@
 """Full-bio logistic baseline on EPCrisprBenchmark (K562, CRE->gene).
 
-This is the *real-data* counterpart of :mod:`linearbaseline.models`: a 26-column
-logistic regression that is the honest floor for CRE->gene prediction on the
-Gasperini/Fulco EPCrispr benchmark.  Everything about it is deliberately plain --
-standardised features, in-fold PCA for the motif block, leave-one-chromosome-out
-CV -- so that the number it produces (AP 0.6715) can be audited column by
-column.
+This is the repository's arm: a 26-column logistic regression that is the
+honest floor for CRE->gene prediction on the Gasperini/Fulco EPCrispr
+benchmark.  Everything about it is deliberately plain -- standardised features,
+in-fold PCA for the motif block, leave-one-chromosome-out CV -- so that the
+number it produces (AP 0.6715) can be audited column by column.
 
 Design matrix, in order::
 

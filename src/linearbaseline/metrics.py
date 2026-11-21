@@ -1,9 +1,10 @@
-"""Metrics and locus-level bootstrap.
+"""Metrics and cluster-level bootstrap.
 
-``average precision`` is the primary metric because positives are rare and
-because it is what the regulatory-genomics benchmarks in this project report.
-Every headline number is accompanied by a *locus-level* bootstrap interval: rows
-inside one locus are correlated, so resampling rows would understate the error.
+``average precision`` is the primary metric because positives are rare (4.55%
+of pairs in the shipped dataset) and because it is what the regulatory-genomics
+benchmarks in this project report.  Every headline number is accompanied by a
+*cluster-level* bootstrap interval: pairs inside one gene are correlated (4.9
+pairs per gene), so resampling rows would understate the error.
 """
 
 from __future__ import annotations
@@ -11,12 +12,7 @@ from __future__ import annotations
 from typing import Dict, List
 
 import numpy as np
-from sklearn.metrics import (
-    average_precision_score,
-    brier_score_loss,
-    log_loss as sk_log_loss,
-    roc_auc_score,
-)
+from sklearn.metrics import average_precision_score, roc_auc_score
 
 
 def average_precision(y: np.ndarray, score: np.ndarray) -> float:
@@ -30,43 +26,34 @@ def auroc(y: np.ndarray, score: np.ndarray) -> float:
     return float(roc_auc_score(y, np.asarray(score)))
 
 
-def log_loss(y: np.ndarray, prob: np.ndarray) -> float:
-    p = np.clip(np.asarray(prob, dtype=np.float64), 1e-7, 1 - 1e-7)
-    return float(sk_log_loss(np.asarray(y), p, labels=[0, 1]))
-
-
-def brier(y: np.ndarray, prob: np.ndarray) -> float:
-    return float(brier_score_loss(np.asarray(y), np.asarray(prob)))
-
-
 def bootstrap_ap_ci(
     y: np.ndarray,
     score: np.ndarray,
-    locus_id: np.ndarray,
+    cluster_id: np.ndarray,
     n_boot: int = 1000,
     alpha: float = 0.05,
     seed: int = 7,
 ) -> Dict[str, float]:
-    """Percentile CI for AP, resampling **loci** with replacement.
+    """Percentile CI for AP, resampling **clusters** (genes) with replacement.
 
-    Loci that end up with a single class are skipped; the number of usable
+    Resamples that end up with a single class are skipped; the number of usable
     resamples is reported so a silently degenerate interval is visible.
     """
     y = np.asarray(y)
     score = np.asarray(score)
-    locus_id = np.asarray(locus_id)
+    cluster_id = np.asarray(cluster_id)
 
-    _, inv = np.unique(locus_id, return_inverse=True)
-    n_loci = int(inv.max()) + 1
+    _, inv = np.unique(cluster_id, return_inverse=True)
+    n_clusters = int(inv.max()) + 1
     order = np.argsort(inv, kind="stable")
-    bounds = np.searchsorted(inv[order], np.arange(n_loci + 1))
-    rows_by_locus: List[np.ndarray] = [order[bounds[i]:bounds[i + 1]] for i in range(n_loci)]
+    bounds = np.searchsorted(inv[order], np.arange(n_clusters + 1))
+    rows_by_cluster: List[np.ndarray] = [order[bounds[i]:bounds[i + 1]] for i in range(n_clusters)]
 
     rng = np.random.default_rng(seed)
     aps = []
     for _ in range(n_boot):
-        pick = rng.integers(0, n_loci, size=n_loci)
-        rows = np.concatenate([rows_by_locus[i] for i in pick])
+        pick = rng.integers(0, n_clusters, size=n_clusters)
+        rows = np.concatenate([rows_by_cluster[i] for i in pick])
         yy = y[rows]
         if yy.min() == yy.max():
             continue

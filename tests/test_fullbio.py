@@ -103,3 +103,19 @@ def test_summarize_reports_distance_bins():
     out = summarize(d["y"], preds, d["dist"])
     assert "all" in out
     assert any(k.endswith("kb") for k in out)
+
+
+def test_readme_matches_committed_results():
+    """The headline numbers in README.md must equal the committed JSON."""
+    import json
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    payload = json.loads((root / "results" / "fullbio_loco.json").read_text(encoding="utf-8"))
+    readme = (root / "README.md").read_text(encoding="utf-8")
+    for arm in ("P0_full_bio", "P1_no_marks", "D0_distance_only"):
+        ap = payload["arms"][arm]["all"]["ap"]
+        assert f"{ap:.4f}" in readme, f"{arm} AP {ap:.4f} missing from README"
+    for label in ("<20kb", "20-100kb", "100kb-1Mb"):
+        ap = payload["arms"]["P0_full_bio"][label]["ap"]
+        assert f"{ap:.4f}" in readme, f"P0 {label} AP {ap:.4f} missing from README"

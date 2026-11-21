@@ -1,24 +1,24 @@
 PY ?= python
 export PYTHONPATH := src
 
-.PHONY: install synthetic train ablations test all clean
+.PHONY: install fullbio test clean all help
 
 install:
 	$(PY) -m pip install -e ".[dev]"
 
-synthetic:
-	$(PY) -m linearbaseline.cli synthetic --out data/synthetic.npz
-
-train: synthetic
-	$(PY) -m linearbaseline.cli train --config configs/synthetic.json --out results
-
-ablations: synthetic
-	$(PY) -m linearbaseline.cli ablations --config configs/synthetic.json --out results
+fullbio:
+	$(PY) -m linearbaseline.cli fullbio --config configs/fullbio.json --out results
 
 test:
 	$(PY) -m pytest
 
-all: test train ablations
+all: test fullbio
 
 clean:
-	rm -rf data results .pytest_cache
+	rm -rf results .pytest_cache
+
+help:
+	@echo "install  editable install with dev extras"
+	@echo "fullbio  LOCO CV on the packaged K562 matrix (~6 s)"
+	@echo "test     pytest"
+	@echo "all      test + fullbio"
