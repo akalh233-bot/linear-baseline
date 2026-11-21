@@ -1,0 +1,23 @@
+{
+  "data": {
+    "kind": "npz",
+    "path": "data/example_real.npz"
+  },
+  "features": {
+    "kmer_k": 4
+  },
+  "split": {
+    "n_folds": 5,
+    "test_frac": 0.2,
+    "seed": 42
+  },
+  "model": {
+    "C_grid": [0.001, 0.01, 0.1, 1.0, 10.0],
+    "max_iter": 4000,
+    "class_weight": "balanced"
+  },
+  "eval": {
+    "n_bootstrap": 2000,
+    "seed": 7
+  }
+}

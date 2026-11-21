@@ -1,0 +1,20 @@
+cff-version: 1.2.0
+title: "linear-baseline: honest linear baselines for cis-regulatory sequence-to-function prediction"
+message: "If you use this software, please cite it as below."
+type: software
+authors:
+  - name: "Tri-Omics Transformer project"
+version: 0.1.0
+date-released: "2026-11-21"
+license: MIT
+repository-code: "https://github.com/akalh233-bot/linear-baseline"
+keywords:
+  - regulatory genomics
+  - TF binding
+  - CRE-gene linkage
+  - baseline
+  - logistic regression
+abstract: >-
+  A minimal, reproducible logistic-regression baseline for TF-CRE and
+  CRE-gene prediction with locus-aware splits, average-precision evaluation
+  and locus-level bootstrap confidence intervals.

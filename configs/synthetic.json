@@ -1,0 +1,27 @@
+{
+  "data": {
+    "kind": "synthetic",
+    "path": "data/synthetic.npz",
+    "n_loci": 4000,
+    "rows_per_locus": 2,
+    "seq_len": 200,
+    "seed": 0
+  },
+  "features": {
+    "kmer_k": 3
+  },
+  "split": {
+    "n_folds": 5,
+    "test_frac": 0.2,
+    "seed": 42
+  },
+  "model": {
+    "C_grid": [0.01, 0.1, 1.0, 10.0],
+    "max_iter": 2000,
+    "class_weight": null
+  },
+  "eval": {
+    "n_bootstrap": 1000,
+    "seed": 7
+  }
+}
