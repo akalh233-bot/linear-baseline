@@ -78,3 +78,44 @@ visible rather than hidden.
 * **Negative sampling.** AU/AP depend on the negative distribution. Matched
   negatives (GC- and distance-matched) are mandatory for a fair comparison
   against published numbers.
+
+## 7. The real-data arm (full bio)
+
+The synthetic ladder above is a plumbing test. The arm that produces the
+headline number is `linearbaseline fullbio`, and it differs in four ways.
+
+**Split: leave-one-chromosome-out (23 folds), not a random locus split.** A
+random locus split leaves the held-out CRE inside the same chromatin
+neighbourhood as training CREs, and a linear model will happily learn "this
+region looks active". Holding out a whole chromosome is the cheapest test of
+cross-region generalisation we can run without a second cell type.
+
+**Feature fitting is strictly in-fold.** PCA-4 of the 128 JASPAR scores, the
+gene-context medians, the standardisation statistics and the logistic weights
+are estimated on the 22 training chromosomes and applied to the held-out one.
+`loco_oof` never touches the test chromosome, not even for a column median; the
+only global statistic is the expression prior's z-score, and that is a property
+of the gene annotation, not of the labels.
+
+**The 26 columns are fixed, not searched.** Distance (2), motif PCA (4),
+accessibility (1), neighbourhood (4), gene side (5), expression prior (1),
+measured marks (9). The count is asserted in a test, so a silent feature
+addition shows up as a failing 26.
+
+**Arms are nested by data availability, not by model capacity.**
+
+| arm | what it costs to deploy |
+| --- | --- |
+| D0 distance only | nothing beyond a TSS annotation |
+| P1 no measured marks | ATAC + sequence + gene annotation |
+| P0 full bio | the above plus four ChIP marks in the target cell type |
+
+The interesting number is not P0; it is P1, because that is what a new cell type
+actually gives you. P0 exists to price the marks: +0.0208 AP, and earlier
+proxy experiments recovered only 6% of that from ATAC + sequence, so the marks
+are not replaceable by a bigger model here.
+
+**Interval: gene-cluster bootstrap.** The 10,356 pairs come from 2,113 genes
+(4.9 pairs per gene), and pairs of one gene share the gene-side, expression and
+neighbourhood columns. Resampling rows would treat them as independent; the
+committed CI resamples genes.

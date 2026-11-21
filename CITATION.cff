@@ -4,7 +4,7 @@ message: "If you use this software, please cite it as below."
 type: software
 authors:
   - name: "Tri-Omics Transformer project"
-version: 0.1.0
+version: 0.2.0
 date-released: "2026-11-21"
 license: MIT
 repository-code: "https://github.com/akalh233-bot/linear-baseline"
@@ -15,6 +15,8 @@ keywords:
   - baseline
   - logistic regression
 abstract: >-
-  A minimal, reproducible logistic-regression baseline for TF-CRE and
-  CRE-gene prediction with locus-aware splits, average-precision evaluation
-  and locus-level bootstrap confidence intervals.
+  A minimal, reproducible logistic-regression baseline for TF-CRE and CRE-gene
+  prediction with locus-aware splits, average-precision evaluation and
+  cluster-level bootstrap confidence intervals. Includes a real-data full-bio
+  arm on the EPCrisprBenchmark K562 CRE->gene task (leave-one-chromosome-out,
+  AP 0.6715, 0.6507 without measured chromatin marks).

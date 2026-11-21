@@ -1,0 +1,15 @@
+{
+  "data": {
+    "kind": "fullbio",
+    "path": "data/fullbio/features.npz"
+  },
+  "model": {
+    "C": 1.0,
+    "max_iter": 400,
+    "n_pca": 4
+  },
+  "eval": {
+    "n_bootstrap": 1000,
+    "seed": 7
+  }
+}

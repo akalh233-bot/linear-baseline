@@ -1,137 +1,139 @@
 # linear-baseline
 
-**Honest linear baselines for cis-regulatory sequence-to-function prediction.**
-A TF–CRE / CRE–gene classifier that is deliberately boring: 3-mer frequencies,
-distance, accessibility and context, fed to L2 logistic regression — with
-locus-aware splits and locus-level bootstrap confidence intervals.
+**A 26-column logistic regression that is the honest floor for CRE→gene
+prediction — and the number any sequence model has to beat.**
 
-> 中文摘要：这是我为 Tri-Omics Transformer / KD-GRN 研究线准备的**线性基线仓库**。
-> 它只做一件事——给出"任何序列模型必须先赢过的地板"，并且把这个地板做得可复现、
-> 可审计：按 locus 分组划分（不泄漏）、AP 为主指标、locus 级 bootstrap 置信区间、
-> 特征组消融阶梯。仓库目前是**占位状态**：合成数据跑通、CI 通过，真实数据结果待填。
+On the EPCrisprBenchmark K562 CRE–gene task, under **leave-one-chromosome-out**
+cross-validation, this baseline reaches **AP 0.6715** (95% CI
+[0.6151, 0.7226], 10,356 pairs / 471 positives / 23 chromosomes). With the nine
+*measured* chromatin marks removed — the deployable setting — it reaches
+**0.6507** (CI [0.5937, 0.7020]). The gap, **+0.0208 AP**, is the entire value
+of H3K27ac/CTCF/H3K4me1/H3K27me3 ChIP data for this task.
+
+> 中文摘要：这是把 `phase3/realdata` 里那条 full-bio 逻辑回归正式打包成仓库。
+> 主结果：LOCO AP **0.6715**，去掉 9 个实测标记后 **0.6507**；距离 <20 kb 的
+> 子集 0.8327，而 100 kb–1 Mb 只有 0.2763。仓库里同时保留一个合成世界，
+> 只用来做 CI 冒烟，不作为任何生物学结论。
 
 ---
 
-## Why this exists
+## Headline numbers
 
-Every sequence model in this project (CNN, dilated CNN, Transformer, distilled
-student) claims a gain over *something*. That something has to be defined
-precisely, otherwise a +0.01 AP difference is indistinguishable from seed noise.
+Task: given a candidate CRE and a candidate target gene, predict whether a
+CRISPRi perturbation of the CRE changes that gene's expression. Labels:
+EPCrisprBenchmark (Gasperini et al. 2019; Fulco et al. 2019), K562.
 
-This repository defines the floor:
+| arm | features | AP | 95% CI | AUC | <20 kb | 20–100 kb | 100 kb–1 Mb |
+| --- | ---: | ---: | --- | ---: | ---: | ---: | ---: |
+| **P0 full bio** | 26 | **0.6715** | [0.6151, 0.7226] | 0.9459 | **0.8327** | 0.6538 | **0.2763** |
+| P1 no measured marks | 17 | 0.6507 | [0.5937, 0.7020] | 0.9440 | 0.8076 | 0.6533 | 0.2563 |
+| D0 distance only | 2 | 0.4210 | [0.3666, 0.4803] | 0.8931 | 0.6335 | 0.2095 | 0.0186 |
+| Δ (marks) | +9 | **+0.0208** | – | +0.0018 | +0.0251 | +0.0005 | +0.0200 |
 
-1. **Same split as the fancy models** — grouped by genomic locus, never random
-   rows. A model that wins only under random splitting has learned locus
-   identity, not regulatory grammar.
-2. **Same metric** — average precision (AP), with a locus-level bootstrap CI.
-   Rows inside one locus are correlated; resampling rows understates the error
-   by a factor of ~2 in our experience.
-3. **Same ablations** — majority, distance-only, k-mer-only, k-mer+distance,
-   full. If "full" does not beat "k-mer-only", the extra covariates are noise.
+Bin sizes: 421 pairs <20 kb (196 positives), 1,399 at 20–100 kb (193), 7,938 at
+100 kb–1 Mb (76). The CI resamples **genes** (2,113 clusters, 1,000 resamples),
+not rows: two candidate CREs of one gene are not independent evidence.
 
-The baseline also doubles as the Gate-0B reference in the KD-GRN protocol:
-a teacher model that cannot beat this student by a pre-registered margin has
-nothing to distil.
+### What the numbers actually say
 
-## Results (synthetic world, smoke scale)
+1. **Distance alone gets 0.42 AP** — and nearly all of it in the near field
+   (<20 kb: 0.63; 100 kb–1 Mb: 0.019). The <20 kb bin is at AP 0.83 while
+   100 kb–1 Mb collapses to 0.28. A model that only learns "close to TSS"
+   already gets most of the easy cases; the hard, interesting regime is distal,
+   and there the full model is still only at 0.28 with 76 positives.
+2. **Measured marks are worth 0.02 AP**, and essentially all of it is in the
+   <20 kb and >100 kb bins, not in the 20–100 kb middle.
+3. **This is a K562-only, single-label-system floor.** It says nothing about
+   cross-cell-state transfer, and its gene-side features come from a candidate
+   universe that is known not to transfer perfectly. Treat 0.6507 as an
+   optimistic deployable bound.
 
-Generated with `linearbaseline synthetic` (4000 loci × 2 rows, 200 bp,
-seed 0), split by locus 80/20, five grouped folds for `C` selection.
-Held-out 800 loci, 1000 locus-bootstrap resamples.
-
-| arm | features | C | AP | AUC | log-loss |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| majority | 0 | – | 0.3663 | – | 0.6575 |
-| distance-only | 4 | 0.01 | 0.3845 | 0.5239 | 0.6568 |
-| kmer-only | 64 | 0.01 | 0.7599 | 0.8533 | 0.4555 |
-| kmer+distance | 68 | 0.01 | 0.7626 | 0.8548 | 0.4537 |
-| **full** | 80 | 0.1 | **0.7596** | 0.8543 | 0.4550 |
-
-Headline: **held-out AP 0.7596** (95% CI [0.7125, 0.8000]) against a 0.3663
-majority baseline. Distance alone is at chance (0.3845), which is expected:
-in this toy world the label is driven by motif dosage, not by TSS proximity.
-That contrast is the point — the ablation ladder makes the claim falsifiable.
-
-These are **synthetic** numbers, produced by the repository's own generator.
-They demonstrate that the pipeline is wired correctly and that the metrics are
-sane. They are **not** evidence about any real regulatory dataset. See
-`docs/RESULTS.md` for the reproduction commands and the honesty caveats.
-
-## Install
+## Reproduce
 
 ```bash
 python -m pip install -e ".[dev]"
-```
 
-or, without installing, prefix commands with `PYTHONPATH=src`
-(PowerShell: `$env:PYTHONPATH="src"`).
+# real-data arm: LOCO CV + gene-cluster bootstrap  (~6 s)
+linearbaseline fullbio --data data/fullbio/features.npz --out results
 
-## Run
-
-```bash
-# 1. synthetic bundle (regenerated deterministically from its seed)
+# synthetic smoke world (pipeline check only)
 linearbaseline synthetic --out data/synthetic.npz
-
-# 2. fit + held-out evaluation + bootstrap CI
-linearbaseline train --config configs/synthetic.json --out results
-
-# 3. feature-group ablation ladder
+linearbaseline train     --config configs/synthetic.json --out results
 linearbaseline ablations --config configs/synthetic.json --out results
 
-# 4. tests
 pytest -q
 ```
 
-Outputs land in `results/`: `metrics.json`, `run.json` (full config + versions),
-`predictions.npz`, `coefficients.csv`, `ablations.json`.
+`results/fullbio_loco.json` in this repository is the committed output of the
+first command; it contains every number above plus the per-bin sample sizes, so
+the README cannot drift from the code without a test failing.
 
-## Data contract
+## The packaged design matrix
 
-`train` accepts any `.npz` with these arrays (see `docs/DESIGN.md` for details):
+`data/fullbio/features.npz` (3.4 MB, committed) holds the 10,356 × 26 matrix and
+its labels. Keys: `base12`, `motif`, `bio`, `gene_ctx`, `expr`, `atac`, `dist`,
+`y`, `chrom`, `gene`. Column order is defined once, in
+`linearbaseline.fullbio.feature_names()`:
 
-| key | dtype | meaning |
-| --- | --- | --- |
-| `seq` | uint8 `(N, L)` | A=0, C=1, G=2, T=3 |
-| `y` | int8 `(N,)` | binary label |
-| `locus_id` | `<U*` or int `(N,)` | genomic locus; **the unit of splitting** |
-| `tf_id` | `<U*` `(N,)` | optional context feature |
-| `cell_state` | `<U*` `(N,)` | optional context feature |
-| `distance_bp` | float `(N,)` | optional CRE→TSS distance |
-| `atac` | float `(N,)` | optional accessibility summary |
+| block | dims | columns | fitted where |
+| --- | ---: | --- | --- |
+| distance | 2 | `log1p(d)/10`, its square | nowhere (raw) |
+| motif | 4 | PCA-4 of 128 JASPAR motif scores | in-fold |
+| accessibility | 1 | `log1p(DHS RPM)` | nowhere (raw) |
+| neighbourhood | 4 | chromatin summary of the CRE's neighbourhood | shipped |
+| gene side | 5 | promoter/gene context from the rE2G bed | shipped (NaN→in-fold median) |
+| expression prior | 1 | log expression prior, z-scored | global median + z |
+| measured marks | 9 | H3K27ac, its percentile, CTCF, H3K4me1, H3K27me3, and four peak flags | shipped |
 
-Point `configs/real_example.json` at your bundle and run the same two commands.
-Rows that share a `locus_id` are never split across train and test.
+"Fitted where" is the leakage contract: PCA, gene-context medians, feature
+standardisation and the logistic weights are all estimated on the 22 training
+chromosomes and applied to the held-out one. Nothing about the test chromosome —
+not even a column median — enters the fit. `docs/DATA.md` documents provenance
+and the exact upstream files.
+
+## Synthetic smoke world
+
+To keep CI hermetic, the repo also ships a generator whose label is known
+(4000 loci × 2 rows, 200 bp, seed 0). It is a plumbing test, not biology:
+
+| arm | features | AP | AUC |
+| --- | ---: | ---: | ---: |
+| majority | 0 | 0.3663 | – |
+| distance-only | 4 | 0.3845 | 0.5239 |
+| k-mer only | 64 | 0.7599 | 0.8533 |
+| k-mer + distance | 68 | 0.7626 | 0.8548 |
+| full | 80 | 0.7596 | 0.8543 |
+
+Distance-only sitting at chance here is the point: in the toy world the label is
+motif dosage, so a feature that dominates real CRE–gene data buys nothing.
 
 ## Design decisions
 
-* **Grouped, label-balanced folds.** Folds are assigned round-robin after
-  sorting loci by positive rate: O(n log n), ~8 ms at 50k loci, no locus
-  straddles a fold. This replaces `StratifiedGroupKFold`, which takes ~11 s at
-  the same scale for the same guarantee.
-* **AP, not accuracy.** Positives are rare and the decision threshold is not
-  meaningful yet.
-* **Locus-level bootstrap.** Resampling loci (not rows) is the only interval
-  that reflects cross-locus generalisation. Degenerate resamples are counted,
-  and the run fails loudly if fewer than half are usable.
-* **No sequence order.** 3-mer bags cannot see motif spacing or orientation.
-  That is intentional: it is the weakest model that still uses sequence, and it
-  makes the "we need convolutions" argument testable.
+* **Leave-one-chromosome-out, not random locus splits.** Random locus splits
+  leave the model surrounded by the same chromatin environment; holding out a
+  whole chromosome is the cheapest honest test of cross-region generalisation.
+* **Gene-cluster bootstrap.** Rows sharing a gene are correlated; resampling
+  rows would produce an interval roughly 1/√(rows per gene) too narrow.
+* **In-fold PCA for the motif block.** 128 correlated JASPAR scores would
+  otherwise let the model fit fold-specific motif noise; PCA-4 fitted on
+  training chromosomes only is what makes the 26 columns stable.
+* **AP, not accuracy, as the headline.** Positives are 4.55% of pairs; the
+  decision threshold is not meaningful until calibration is done.
+* **Ablations are shipped, not implied.** The nine mark columns are the only
+  block that can be removed without re-deriving raw data, so the repository
+  reports that ablation as a first-class arm rather than an afterthought.
 
 ## Status
 
-- [x] feature builders, logistic regression, grouped CV
-- [x] locus-level bootstrap CI, ablation ladder
-- [x] unit + end-to-end tests, GitHub Actions CI
-- [ ] real-data run (ChIP/MPRA-derived bundles)
-- [ ] calibrated probabilities (isotonic / Platt) and ECE reporting
-- [ ] comparison table against the CNN / distilled student
+- [x] real-data full-bio arm (LOCO, gene-cluster CI, marks ablation)
+- [x] packaged 3.4 MB design matrix + provenance doc
+- [x] synthetic smoke world, unit + end-to-end tests, GitHub Actions CI
+- [ ] probability calibration (isotonic / Platt) and ECE reporting
+- [ ] head-to-head table against a CNN / distilled student on the same splits
+- [ ] cross-cell-state arm (needs matched labels; not yet available)
 
-## Citation
+## Citation & license
 
-If you use this code, cite the repository (see `CITATION.cff`). The scientific
-context is the perturbation-aware distillation protocol described in the
-project's internal reports; this repo only provides the baseline.
-
-## License
-
-MIT — see `LICENSE`.
+See `CITATION.cff`. Upstream data: Gasperini et al., *Cell* 2019
+(doi:10.1016/j.cell.2019.11.001) and Fulco et al., *Nature Genetics* 2019
+(doi:10.1038/s41588-019-0537-1). Code and packaged matrix: MIT (`LICENSE`).

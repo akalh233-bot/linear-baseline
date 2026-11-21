@@ -1,7 +1,15 @@
-# data & results are regenerated, never committed
-data/
-results/
+# data & results are regenerated, never committed -- except the packaged
+# real-data table and its headline result, which are small and must stay
+# bit-identical for the README to be reproducible.
+# (git cannot re-include a file whose parent directory is excluded, so the
+#  directory patterns are written one level down.)
+data/*
 !data/.gitkeep
+!data/fullbio/
+data/fullbio/*
+!data/fullbio/features.npz
+results/*
+!results/fullbio_loco.json
 
 # python
 __pycache__/

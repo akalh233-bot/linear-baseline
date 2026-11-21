@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "linearbaseline"
 version = "0.1.0"
-description = "Honest linear baselines for cis-regulatory sequence-to-function prediction"
+description = "Honest linear baselines for cis-regulatory sequence-to-function prediction, including a full-bio CRE->gene arm on EPCrisprBenchmark"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }

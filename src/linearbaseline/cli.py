@@ -235,6 +235,34 @@ def cmd_ablations(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_fullbio(args: argparse.Namespace) -> int:
+    """Real-data arm: EPCrisprBenchmark K562, leave-one-chromosome-out."""
+    from .fullbio import load_fullbio, run_arms
+
+    started = time.time()
+    d = load_fullbio(args.data)
+    arms = run_arms(d, C=args.C, n_boot=args.bootstrap, seed=args.seed)
+
+    outdir = Path(args.out)
+    outdir.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "data": str(args.data),
+        "n": int(len(d["y"])),
+        "pos": int(d["y"].sum()),
+        "n_chrom": int(len(np.unique(d["chrom"]))),
+        "n_gene": int(len(np.unique(d["gene"]))),
+        "C": args.C,
+        "arms": arms,
+        "seconds": round(time.time() - started, 2),
+        "versions": {"python": platform.python_version(), "numpy": np.__version__,
+                     "command": sys.argv},
+    }
+    with open(outdir / "fullbio_loco.json", "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2, default=float)
+    print(f"wrote {outdir / 'fullbio_loco.json'}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="linearbaseline", description=__doc__)
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
@@ -258,6 +286,14 @@ def build_parser() -> argparse.ArgumentParser:
     abl.add_argument("--config", default=None)
     abl.add_argument("--out", default="results")
     abl.set_defaults(func=cmd_ablations)
+
+    fb = sub.add_parser("fullbio", help="real-data full-bio arm (EPCrisprBenchmark, LOCO)")
+    fb.add_argument("--data", default="data/fullbio/features.npz")
+    fb.add_argument("--out", default="results")
+    fb.add_argument("--C", type=float, default=1.0)
+    fb.add_argument("--bootstrap", type=int, default=1000)
+    fb.add_argument("--seed", type=int, default=7)
+    fb.set_defaults(func=cmd_fullbio)
     return parser
 
 
