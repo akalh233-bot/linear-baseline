@@ -30,7 +30,7 @@ from sklearn.decomposition import PCA
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import average_precision_score, roc_auc_score
 
-from .metrics import bootstrap_ap_ci
+from .metrics import DEFAULT_THRESHOLDS, bootstrap_ap_ci, calibration, threshold_table
 
 # Column indices inside `base12` (the 12 raw EPCrispr design columns).
 MARK_CONT: Tuple[int, ...] = (2, 4, 5, 6)  # h3k27ac, ctcf, h3k4me1, h3k27me3
@@ -78,10 +78,42 @@ def load_fullbio(path: str) -> Dict[str, np.ndarray]:
     return out
 
 
-def _expression_prior(expr: np.ndarray) -> np.ndarray:
+def _expression_prior(
+    expr: np.ndarray,
+    ref_mean: Optional[float] = None,
+    ref_std: Optional[float] = None,
+    fill: Optional[float] = None,
+) -> np.ndarray:
+    """Z-scored log-expression prior.
+
+    When ``ref_mean``/``ref_std`` are given (cross-cell-line transfer) the
+    reference statistics of the *training* cell line are applied, so the test
+    cell line's own expression mean never leaks into the features.  With no
+    reference the array is standardised on its own rows, which is what
+    :func:`load_fullbio` does for the packaged K562 table.  ``fill`` imputes
+    missing genes (the training median is the right choice in transfer).
+    """
     ev = np.asarray(expr, dtype=np.float64).copy()
-    ev = np.where(np.isfinite(ev), ev, np.nanmedian(ev))
-    return (ev - ev.mean()) / (ev.std() + 1e-9)
+    ev = np.where(np.isfinite(ev), ev, np.nanmedian(ev) if fill is None else fill)
+    if ref_mean is None or ref_std is None:
+        return (ev - ev.mean()) / (ev.std() + 1e-9)
+    return (ev - ref_mean) / (ref_std + 1e-9)
+
+
+def _fill_gene_ctx(gene_ctx: np.ndarray, medians: Optional[np.ndarray] = None) -> Tuple[np.ndarray, np.ndarray]:
+    """Median-impute the gene-side block; medians can come from a training set."""
+    gf = np.asarray(gene_ctx, dtype=np.float64).copy()
+    if medians is None:
+        medians = np.array([np.nanmedian(gf[:, j]) for j in range(gf.shape[1])])
+    medians = np.asarray(medians, dtype=np.float64).copy()
+    if not np.isfinite(medians).all():
+        # A column that is entirely missing in the training rows cannot be
+        # imputed from them; fall back to 0.0, the mean of the standardised
+        # training block, and let the logistic weight decide what it is worth.
+        medians = np.where(np.isfinite(medians), medians, 0.0)
+    for j in range(gf.shape[1]):
+        gf[~np.isfinite(gf[:, j]), j] = medians[j]
+    return gf, medians
 
 
 def _assemble(
@@ -129,10 +161,8 @@ def loco_oof(
         pca = PCA(n_components=n_pca, random_state=0).fit(motif[tr])
         motif_pca = pca.transform(motif).astype(np.float64)
 
-        gf = gene_ctx.copy()
-        for j in range(gf.shape[1]):
-            med = np.nanmedian(gf[tr, j])
-            gf[~np.isfinite(gf[:, j]), j] = med
+        medians = np.array([np.nanmedian(gene_ctx[tr, j]) for j in range(gene_ctx.shape[1])])
+        gf, _ = _fill_gene_ctx(gene_ctx, medians=medians)
 
         F = _assemble(d, motif_pca, gf, with_marks)
         mu = F[tr].mean(0)
@@ -162,6 +192,120 @@ def loco_oof_distance(d: Dict[str, np.ndarray], C: float = 1.0, max_iter: int = 
     return preds
 
 
+def fit_transfer(
+    train: Dict[str, np.ndarray],
+    test: Dict[str, np.ndarray],
+    C: float = 1.0,
+    n_pca: int = 4,
+    with_marks: bool = True,
+    max_iter: int = 400,
+) -> np.ndarray:
+    """Fit the full-bio model on one cell line, score a *different* cell line.
+
+    Everything fitted -- PCA, gene-context medians, expression centring,
+    standardisation, logistic weights -- is estimated on ``train`` only; the
+    test cell line contributes raw columns and nothing else.  This is the
+    zero-shot transfer protocol: the labels of the target cell type are never
+    touched, so the resulting probabilities can be thresholded and scored.
+
+    The test table must carry the same keys as :func:`load_fullbio` (``base12``,
+    ``motif``, ``bio``, ``gene_ctx``, ``expr``, ``atac``, ``dist``, ``y``,
+    ``chrom``, ``gene``); ``cell`` is used only by :func:`run_transfer` and is
+    not needed here.
+    """
+    motif_pca_train = PCA(n_components=n_pca, random_state=0).fit(train["motif"])
+    motif_train = motif_pca_train.transform(train["motif"]).astype(np.float64)
+    motif_test = motif_pca_train.transform(test["motif"]).astype(np.float64)
+
+    train_medians = np.array([np.nanmedian(train["gene_ctx"][:, j]) for j in range(train["gene_ctx"].shape[1])])
+    train_gc, _ = _fill_gene_ctx(train["gene_ctx"], medians=train_medians)
+    test_gc, _ = _fill_gene_ctx(test["gene_ctx"], medians=train_medians)
+
+    train_expr = np.asarray(train["expr"], dtype=np.float64)
+    train_expr = np.where(np.isfinite(train_expr), train_expr, np.nanmedian(train_expr))
+    expr_mean, expr_std = float(train_expr.mean()), float(train_expr.std())
+    test_exprz = _expression_prior(test["expr"], ref_mean=expr_mean, ref_std=expr_std, fill=float(np.nanmedian(train_expr)))
+
+    F_train = _assemble(train, motif_train, train_gc, with_marks)
+    test_view = {**test, "exprz": test_exprz}
+    F_test = _assemble(test_view, motif_test, test_gc, with_marks)
+
+    mu = F_train.mean(0)
+    sd = F_train.std(0) + 1e-9
+    lr = LogisticRegression(C=C, max_iter=max_iter).fit((F_train - mu) / sd, train["y"])
+    return lr.predict_proba((F_test - mu) / sd)[:, 1]
+
+
+def _summarize_transfer_stratum(
+    y: np.ndarray,
+    score: np.ndarray,
+    dist: np.ndarray,
+    gene: np.ndarray,
+    n_boot: int,
+    seed: int,
+    thresholds: Sequence[float],
+    min_pos: int = 20,
+) -> Dict:
+    """Summarize one stratum, with a gene bootstrap only if it can be trusted.
+
+    Small target cell types (7-16 positives) cannot support a 1,000-resample
+    gene bootstrap -- resamples without both classes are skipped and the
+    interval degenerates.  Below ``min_pos`` positives the point AP is reported
+    without an interval rather than a misleading one.
+    """
+    y = np.asarray(y)
+    if int(y.sum()) >= min_pos:
+        return summarize(y, score, dist, cluster=gene, n_boot=n_boot, seed=seed, thresholds=thresholds)
+    return summarize(y, score, dist, cluster=None, n_boot=n_boot, seed=seed, thresholds=thresholds)
+
+
+def run_transfer(
+    train: Dict[str, np.ndarray],
+    test: Dict[str, np.ndarray],
+    C: float = 1.0,
+    n_boot: int = 1000,
+    seed: int = 7,
+    thresholds: Sequence[float] = DEFAULT_THRESHOLDS,
+    verbose: bool = True,
+) -> Dict[str, Dict]:
+    """Zero-shot cross-cell-line arms: K562-trained P0 and P1 on held-out types.
+
+    Returns the same shape as :func:`run_arms` (``P0_full_bio``, ``P1_no_marks``,
+    ``delta_marks``) plus a ``cells`` mapping inside each arm.  ``test["cell"]``
+    is required and is the cell line of each held-out pair.
+    """
+    cell = np.asarray(test["cell"]).astype(str)
+    arms: Dict[str, Dict] = {}
+    for name, with_marks in (("P0_full_bio", True), ("P1_no_marks", False)):
+        preds = fit_transfer(train, test, C=C, with_marks=with_marks)
+        summary = _summarize_transfer_stratum(
+            test["y"], preds, test["dist"], test["gene"], n_boot, seed, thresholds
+        )
+        summary["cells"] = {}
+        for label in sorted(np.unique(cell)):
+            m = cell == label
+            summary["cells"][label] = _summarize_transfer_stratum(
+                test["y"][m], preds[m], test["dist"][m], test["gene"][m], n_boot, seed, thresholds
+            )
+        arms[name] = summary
+        if verbose:
+            a = summary["all"]
+            print(f"{name:16s} transfer AP {a['ap']:.4f}  n={a['n']}  pos={a['pos']}")
+            for label, cell_summary in summary["cells"].items():
+                c = cell_summary["all"]
+                at_90 = min(c["thresholds"], key=lambda r: abs(r["threshold"] - 0.90))
+                print(
+                    f"    {label:8s} AP {c['ap']:.4f}  n={c['n']:5d} pos={c['pos']:4d}"
+                    f"  calls@0.90={at_90['flagged']:4d} prec={at_90['precision']:.3f}"
+                )
+    arms["delta_marks"] = {"all": arms["P0_full_bio"]["all"]["ap"] - arms["P1_no_marks"]["all"]["ap"]}
+    arms["delta_marks"]["cells"] = {
+        label: arms["P0_full_bio"]["cells"][label]["all"]["ap"] - arms["P1_no_marks"]["cells"][label]["all"]["ap"]
+        for label in arms["P0_full_bio"]["cells"]
+    }
+    return arms
+
+
 def distance_mask(dist: np.ndarray, lo: float, hi: float) -> np.ndarray:
     dist = np.asarray(dist, dtype=np.float64)
     return (dist >= lo) & (dist < hi)
@@ -174,8 +318,16 @@ def summarize(
     cluster: Optional[np.ndarray] = None,
     n_boot: int = 1000,
     seed: int = 7,
+    thresholds: Sequence[float] = DEFAULT_THRESHOLDS,
 ) -> Dict:
-    """Overall + distance-binned AP, with a gene-level bootstrap interval."""
+    """Overall + distance-binned AP, threshold call sets, and calibration.
+
+    ``thresholds`` is carried into every stratum so the near-field and distal
+    bins answer the same deployment question ("how many calls, how many true")
+    as the pooled arm.  Calibration (Brier, ECE, reliability bins) is reported
+    once, on the pooled rows, because the bins are too sparse per distance bin
+    to mean anything.
+    """
     y = np.asarray(y)
     score = np.asarray(score)
     out: Dict = {
@@ -184,6 +336,8 @@ def summarize(
             "auc": float(roc_auc_score(y, score)),
             "n": int(len(y)),
             "pos": int(y.sum()),
+            "calibration": calibration(y, score),
+            "thresholds": threshold_table(y, score, thresholds),
         }
     }
     if cluster is not None:
@@ -198,6 +352,7 @@ def summarize(
             "auc": float(roc_auc_score(y[m], score[m])),
             "n": int(m.sum()),
             "pos": int(y[m].sum()),
+            "thresholds": threshold_table(y[m], score[m], thresholds),
         }
     return out
 

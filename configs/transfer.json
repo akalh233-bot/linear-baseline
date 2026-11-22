@@ -1,0 +1,7 @@
+{
+  "train": "data/fullbio/features.npz",
+  "data": "data/fullbio/heldout_5ct.npz",
+  "C": 1.0,
+  "bootstrap": 1000,
+  "seed": 7
+}

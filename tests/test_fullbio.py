@@ -8,10 +8,13 @@ import pytest
 from linearbaseline.fullbio import (
     MARK_ALL,
     feature_names,
+    fit_transfer,
     load_fullbio,
     loco_oof,
+    run_transfer,
     summarize,
 )
+from linearbaseline.metrics import calibration, threshold_table
 
 
 def _toy_table(seed: int = 0, n_per_chrom: int = 120, n_chrom: int = 5):
@@ -57,6 +60,7 @@ def _toy_table(seed: int = 0, n_per_chrom: int = 120, n_chrom: int = 5):
         "y": y,
         "chrom": chrom,
         "gene": gene,
+        "cell": np.where(np.arange(n) % 2 == 0, "cellA", "cellB").astype("U"),
         "exprz": (expr - expr.mean()) / (expr.std() + 1e-9),
     }
 
@@ -105,6 +109,67 @@ def test_summarize_reports_distance_bins():
     assert any(k.endswith("kb") for k in out)
 
 
+def test_threshold_table_is_a_confusion_matrix():
+    rng = np.random.default_rng(11)
+    y = rng.integers(0, 2, size=500)
+    score = np.clip(0.7 * y + rng.normal(scale=0.3, size=500), 0.0, 1.0)
+    rows = threshold_table(y, score, thresholds=(0.5, 0.8, 0.9, 0.95))
+    flagged = []
+    for row in rows:
+        assert row["tp"] + row["fp"] == row["flagged"]
+        assert row["tp"] + row["fn"] == int(y.sum())
+        assert row["tn"] + row["fp"] == int((y == 0).sum())
+        assert row["precision"] == pytest.approx(row["tp"] / max(row["flagged"], 1))
+        assert row["recall"] == pytest.approx(row["tp"] / int(y.sum()))
+        assert row["specificity"] == pytest.approx(row["tn"] / int((y == 0).sum()))
+        flagged.append(row["flagged"])
+    assert flagged == sorted(flagged, reverse=True), "a higher cut cannot flag more rows"
+
+
+def test_calibration_bins_cover_every_row():
+    rng = np.random.default_rng(13)
+    y = rng.integers(0, 2, size=400)
+    score = np.clip(0.6 * y + rng.normal(scale=0.35, size=400), 0.0, 1.0)
+    out = calibration(y, score, n_bins=10)
+    assert sum(b["n"] for b in out["bins"]) == len(y)
+    assert 0.0 <= out["ece"] <= 1.0
+    assert out["brier"] == pytest.approx(float(np.mean((score - y) ** 2)))
+    assert all(b["lo"] <= b["mean_pred"] <= b["hi"] for b in out["bins"])
+
+
+def test_summarize_includes_thresholds_and_calibration():
+    d = _toy_table(seed=19)
+    preds = loco_oof(d, C=1.0, n_pca=2, max_iter=200)
+    out = summarize(d["y"], preds, d["dist"])
+    cuts = [r["threshold"] for r in out["all"]["thresholds"]]
+    assert cuts == [0.50, 0.60, 0.70, 0.75, 0.80, 0.85, 0.90, 0.95, 0.99]
+    assert "calibration" in out["all"]
+    assert all("thresholds" in stratum for stratum in out.values())
+
+
+def test_fit_transfer_ignores_target_labels():
+    train = _toy_table(seed=23)
+    test = _toy_table(seed=29)
+    flipped = {**test, "y": 1 - test["y"]}
+    a = fit_transfer(train, test, n_pca=2, max_iter=200)
+    b = fit_transfer(train, flipped, n_pca=2, max_iter=200)
+    np.testing.assert_allclose(a, b)
+    assert ((a >= 0) & (a <= 1)).all()
+
+
+def test_run_transfer_reports_each_cell():
+    train = _toy_table(seed=31)
+    test = _toy_table(seed=37)
+    arms = run_transfer(train, test, n_boot=200, verbose=False)
+    assert set(arms["P0_full_bio"]["cells"]) == {"cellA", "cellB"}
+    for arm in ("P0_full_bio", "P1_no_marks"):
+        assert arms[arm]["all"]["n"] == len(test["y"])
+        assert "thresholds" in arms[arm]["all"]
+        for cell in arms[arm]["cells"].values():
+            assert cell["all"]["n"] > 0
+    assert "all" in arms["delta_marks"]
+
+
 def test_readme_matches_committed_results():
     """The headline numbers in README.md must equal the committed JSON."""
     import json
@@ -119,3 +184,26 @@ def test_readme_matches_committed_results():
     for label in ("<20kb", "20-100kb", "100kb-1Mb"):
         ap = payload["arms"]["P0_full_bio"][label]["ap"]
         assert f"{ap:.4f}" in readme, f"P0 {label} AP {ap:.4f} missing from README"
+
+
+def test_readme_matches_committed_transfer_results():
+    """The transfer numbers in README.md must equal the committed JSON."""
+    import json
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    payload = json.loads((root / "results" / "heldout_transfer.json").read_text(encoding="utf-8"))
+    readme = (root / "README.md").read_text(encoding="utf-8")
+
+    p0 = payload["arms"]["P0_full_bio"]
+    assert f"{p0['all']['ap']:.4f}" in readme, "pooled transfer AP missing from README"
+    for label, cell in p0["cells"].items():
+        assert f"{cell['all']['ap']:.4f}" in readme, f"{label} transfer AP missing from README"
+    at_90 = next(r for r in p0["all"]["thresholds"] if r["threshold"] == 0.90)
+    assert f"{at_90['precision']:.4f}" in readme, "pooled precision at 0.90 missing from README"
+
+    loco = json.loads((root / "results" / "fullbio_loco.json").read_text(encoding="utf-8"))
+    for arm in ("P0_full_bio", "P1_no_marks", "D0_distance_only"):
+        rows = loco["arms"][arm]["all"]["thresholds"]
+        assert [r["threshold"] for r in rows] == [0.50, 0.60, 0.70, 0.75, 0.80, 0.85, 0.90, 0.95, 0.99]
+        assert "calibration" in loco["arms"][arm]["all"]

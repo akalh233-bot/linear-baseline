@@ -92,7 +92,30 @@ understates the interval. `bootstrap_ap_ci` also refuses to return an interval
 if fewer than half of the resamples contain both classes: sparse positives fail
 loudly instead of silently returning a degenerate `[x, x]`.
 
-## 6. What would make this baseline wrong
+## 6. Operating points are reported, and transfer is zero-shot
+
+AP ranks; it does not decide. Every arm therefore also emits
+`threshold_table` (calls, TP/FP, precision, recall, specificity, F1, MCC, lift
+at nine cuts) and `calibration` (Brier, ECE, ten reliability bins). Two
+rationale points:
+
+* **A threshold table is a result, not a footnote.** The 0.90 shortlist is 72
+  pairs at 0.889 precision in-domain; publishing only AP would hide that a
+  high-confidence call set exists but recovers one positive in seven.
+* **Thresholds are not tuned on the test fold.** The same nine cuts are reported
+  for every stratum and every arm, so comparing P0/P1 at 0.90 is a like-for-like
+  comparison rather than a per-arm optimum.
+
+Transfer is zero-shot by construction: `fit_transfer` estimates PCA, medians,
+expression centring, standardisation and weights on K562 only, and the target
+table contributes raw columns plus labels that are read *after* prediction. The
+target cell line does supply its own measured marks and accessibility, and its
+neighbourhood block is recomputed within the cell line; that is the deployment
+question ("same function, new measurements"), not a retrained state arm. The
+gene-side and expression columns remain K562 proxies and are the main reason the
+transfer number is a lower bound.
+
+## 7. What would make this baseline wrong
 
 * **Proposing its own candidates.** The negatives come from the benchmark's
   tested pairs. A model that generates candidates will face a different,
@@ -102,15 +125,19 @@ loudly instead of silently returning a degenerate `[x, x]`.
   They encode the candidate universe itself, and external validation in this
   project showed that class of feature transfers poorly. That is why P1 (0.6507)
   is described as an optimistic bound, not a deployable number.
-* **A different cell state.** The nine mark columns are K562 ChIP data. In
-  another cell type they must be re-measured; without them the model is P1, and
-  nothing here tests cross-state transfer.
+* **A different cell state.** The zero-shot transfer is the only cross-state
+  evidence here, and it hands the target cell line its measured marks. Without
+  ChIP/ATAC in the target type the model is P1 (transfer 0.6602 pooled, but
+  no 0.90 calls in WTC11/Jurkat). Retraining per state would need matched labels
+  and is not attempted.
 * **A different negative-sampling scheme.** AU/AP depend on the negative
   distribution. Numbers from GC-matched or distance-matched sampling are not
   comparable to these and must be reported separately.
 
-## 7. Non-goals
+## 8. Non-goals
 
-No probability calibration (raw logistic outputs are reported, so miscalibration
-is visible). No sequence model, no augmentation, no multi-task head. Those are
-the things this baseline exists to be compared against, not to contain.
+No probability recalibration: raw logistic outputs are reported and their
+miscalibration (top decile predicted 0.949, observed 0.889) is visible and
+measured rather than corrected. No sequence model, no augmentation, no
+multi-task head, no per-state retraining. Those are the things this baseline
+exists to be compared against, not to contain.

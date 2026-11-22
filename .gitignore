@@ -1,5 +1,5 @@
 # data & results are regenerated, never committed -- except the packaged
-# real-data table and its headline result, which are small and must stay
+# real-data tables and the two headline results, which are small and must stay
 # bit-identical for the README to be reproducible.
 # (git cannot re-include a file whose parent directory is excluded, so the
 #  directory patterns are written one level down.)
@@ -8,8 +8,10 @@ data/*
 !data/fullbio/
 data/fullbio/*
 !data/fullbio/features.npz
+!data/fullbio/heldout_5ct.npz
 results/*
 !results/fullbio_loco.json
+!results/heldout_transfer.json
 
 # python
 __pycache__/

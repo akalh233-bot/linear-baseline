@@ -28,6 +28,9 @@ jobs:
       - name: End-to-end run (fullbio arm)
         run: |
           linearbaseline fullbio --config configs/fullbio.json --out results
+      - name: End-to-end run (zero-shot transfer)
+        run: |
+          linearbaseline transfer --config configs/transfer.json --out results
       - name: Upload results
         uses: actions/upload-artifact@v4
         with:
