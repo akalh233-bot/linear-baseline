@@ -8,9 +8,10 @@ The shipped arm is the *full-bio* CRE->gene model on the EPCrisprBenchmark K562
 set (leave-one-chromosome-out, AP 0.6715).
 """
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 from .fullbio import (
+    CHIP_FEATURE_NAMES,
     MARK_ALL,
     distance_mask,
     feature_names,
@@ -28,11 +29,13 @@ from .metrics import (
     bootstrap_ap_ci,
     calibration,
     operating_point,
+    paired_bootstrap_delta_ap,
     threshold_table,
 )
 
 __all__ = [
     "__version__",
+    "CHIP_FEATURE_NAMES",
     "DEFAULT_THRESHOLDS",
     "MARK_ALL",
     "average_precision",
@@ -45,6 +48,7 @@ __all__ = [
     "load_fullbio",
     "loco_oof",
     "operating_point",
+    "paired_bootstrap_delta_ap",
     "run_arms",
     "run_transfer",
     "summarize",

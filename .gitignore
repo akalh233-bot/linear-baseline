@@ -12,6 +12,7 @@ data/fullbio/*
 results/*
 !results/fullbio_loco.json
 !results/heldout_transfer.json
+!results/publication_suite.json
 
 # python
 __pycache__/

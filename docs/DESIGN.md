@@ -2,10 +2,14 @@
 
 Why the baseline is built the way it is, and what it deliberately refuses to do.
 
-The repository ships exactly one arm: a standardised logistic regression over 26
-columns, evaluated leave-one-chromosome-out on the EPCrisprBenchmark K562
-CRE→gene set. Its purpose is to be the floor that any sequence model has to
-beat, and to be auditable column by column.
+The repository ships a nested family of standardised L2 logistic regressions
+(`C = 1.0`) evaluated leave-one-chromosome-out (23 folds) on the
+EPCrisprBenchmark K562 CRE→gene set: `D0_distance_only` (2 cols),
+`P1_no_marks_nobio` (23 cols, strictly zero-ChIP and screen-independent),
+`P1_no_marks` (25 cols, strictly zero-ChIP), `P0_nobio` (34 cols),
+`P0_full_bio` (38 cols, portable across cell types), and `P2_full_bio_3d`
+(42 cols, adding K562 Micro-C 3D contact). Its purpose is to be the honest,
+auditable floor that any sequence model has to beat.
 
 ## 1. The unit of generalisation is the chromosome
 
@@ -28,14 +32,14 @@ which is why every headline number carries a gene-cluster bootstrap interval.
 
 ## 2. Feature fitting is strictly in-fold
 
-`loco_oof` fits, on the 22 training chromosomes only: the PCA-4 basis of the
-128 JASPAR motif scores, the gene-context medians used for NaN imputation, the
+`loco_oof` fits, on the 22 training chromosomes only: the motif scaler and
+PCA-4 basis of the 128 JASPAR motif scores, the gene-context medians used for
+NaN imputation, the expression-prior median/mean/std, the design-matrix
 standardisation means/variances, and the logistic weights. Nothing about the
-test chromosome — not even a column median — enters the fit.
-
-The single exception is the expression prior: a global median imputation plus a
-z-score of `gene_expr_sym`. It is a property of the gene annotation rather than
-of the labels, and it is applied identically to every fold.
+test chromosome — not even a column median or expression mean — enters the fit.
+For zero-ChIP arms (`P1_no_marks`, `P1_no_marks_nobio`), all ChIP-derived
+columns (`base12[:, 2:11]`, `bio[:, 2:4]`, `raw_extra[:, 3:5]`) are excluded
+and enforced by a bit-identical perturbation invariance unit test.
 
 `C` is fixed at 1.0 rather than tuned per fold. Tuning it on the held-out
 chromosome would be selection on the test set; tuning it on the training

@@ -196,3 +196,48 @@ def calibration(y: np.ndarray, score: np.ndarray, n_bins: int = 10) -> Dict[str,
 def operating_point(y: np.ndarray, score: np.ndarray, threshold: float) -> Dict[str, float]:
     """One row of :func:`threshold_table`, for callers that need a single cut."""
     return threshold_table(y, score, thresholds=(float(threshold),))[0]
+
+
+def paired_bootstrap_delta_ap(
+    y: np.ndarray,
+    score_a: np.ndarray,
+    score_b: np.ndarray,
+    cluster_id: np.ndarray,
+    n_boot: int = 1000,
+    alpha: float = 0.05,
+    seed: int = 7,
+) -> Dict[str, float]:
+    """Paired percentile CI for AP(score_a) - AP(score_b), resampling clusters."""
+    y = np.asarray(y)
+    score_a = np.asarray(score_a)
+    score_b = np.asarray(score_b)
+    cluster_id = np.asarray(cluster_id)
+
+    _, inv = np.unique(cluster_id, return_inverse=True)
+    n_clusters = int(inv.max()) + 1
+    order = np.argsort(inv, kind="stable")
+    bounds = np.searchsorted(inv[order], np.arange(n_clusters + 1))
+    rows_by_cluster: List[np.ndarray] = [order[bounds[i]:bounds[i + 1]] for i in range(n_clusters)]
+
+    rng = np.random.default_rng(seed)
+    deltas = []
+    for _ in range(n_boot):
+        pick = rng.integers(0, n_clusters, size=n_clusters)
+        rows = np.concatenate([rows_by_cluster[i] for i in pick])
+        yy = y[rows]
+        if yy.min() == yy.max():
+            continue
+        deltas.append(average_precision(yy, score_a[rows]) - average_precision(yy, score_b[rows]))
+
+    if len(deltas) < 0.5 * n_boot:
+        raise RuntimeError(
+            f"only {len(deltas)}/{n_boot} paired bootstrap resamples had both classes"
+        )
+    deltas_arr = np.asarray(deltas)
+    return {
+        "delta": float(average_precision(y, score_a) - average_precision(y, score_b)),
+        "ci_low": float(np.percentile(deltas_arr, 100 * alpha / 2)),
+        "ci_high": float(np.percentile(deltas_arr, 100 * (1 - alpha / 2))),
+        "p_gt0": float(np.mean(deltas_arr > 0.0)),
+        "n_valid": int(len(deltas_arr)),
+    }

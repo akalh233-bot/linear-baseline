@@ -1,41 +1,22 @@
 # -*- coding: utf-8 -*-
 """Repackage the held-out five-cell-type EPCrispr table into ``heldout_5ct.npz``.
 
-This is the target table for the zero-shot transfer arm: the same 26 columns as
-``data/fullbio/features.npz``, built row by row from the held-out benchmark, with
-the target cell line's *measured* marks and accessibility (label-free) and the
-K562-derived gene-side / expression proxies that the model was trained with.
-No label of the target cell line is used to build a column.
-
-Inputs (none of them are redistributed here):
-
-``--x``       ``epcrispr_seq_held/X.npy``  (n, 140) float32
-              [12 design columns | 128 JASPAR motif scores]
-``--meta``    ``epcrispr_seq_held/meta.csv``
-              pair_id, state_idx, gene, d, contact, atac, mask, y, split
-``--raw-tsv`` ``EPCrisprBenchmark_combined_data.heldout_5_cell_types.GRCh38.tsv.gz``
-              supplies ``chrom``, ``CellType`` and the label; filtered to
-              ``ValidConnection == True`` and asserted row-aligned with meta
-``--ctx``     ``results/e2g_gene_ctx.csv``  per-gene gene-side block (5 columns)
-``--expr``    ``results/gene_expr_sym.csv``  ``gene``, ``log_expr``
-
-The neighbourhood block (``bio``, 4 columns) is recomputed here, exactly as
-``ctx_eval.py`` does for the training table but **within each target cell type**:
-for each gene, the CRE's own row is removed from the mean/fraction/max of the
-other candidate elements of that gene.  That keeps the column label-free while
-letting the model see the target cell line's chromatin context, which is the
-honest zero-shot deployment: marks and accessibility are measured, labels are
-not.
+Builds the exact same feature blocks as ``data/fullbio/features.npz`` for the
+4,378-pair held-out five-cell-type table (K562, WTC11, HCT116, GM12878, Jurkat),
+with strict row-by-row alignment assertions and zero target-label usage.
 
 Example::
 
-    python scripts/build_heldout_npz.py \\
-        --x      phase3/realdata/epcrispr_seq_held/X.npy \\
-        --meta   phase3/realdata/epcrispr_seq_held/meta.csv \\
-        --raw-tsv data/raw/rE2G/heldout_5_cell_types/EPCrisprBenchmark_combined_data.heldout_5_cell_types.GRCh38.tsv.gz \\
-        --ctx    phase3/realdata/results/e2g_gene_ctx.csv \\
-        --expr   phase3/realdata/results/gene_expr_sym.csv \\
-        --out    data/fullbio/heldout_5ct.npz
+    python scripts/build_heldout_npz.py \
+        --x       ../phase3/realdata/epcrispr_seq_held/X.npy \
+        --meta    ../phase3/realdata/epcrispr_seq_held/meta.csv \
+        --raw-tsv ../data/raw/rE2G/heldout_5_cell_types/EPCrisprBenchmark_combined_data.heldout_5_cell_types.GRCh38.tsv.gz \
+        --ctx     ../phase3/realdata/results/e2g_gene_ctx.csv \
+        --expr    ../phase3/realdata/results/gene_expr_sym.csv \
+        --tss     ../tools/tss_prot.npz \
+        --ccre    ../refs/cCRE_v3.bed.gz \
+        --hic     ../data/raw/hic/K562_MicroC_hg38.hic \
+        --out     data/fullbio/heldout_5ct.npz
 """
 
 from __future__ import annotations
@@ -43,17 +24,29 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _genomic_builders import (  # noqa: E402
+    compute_genomic_ctx,
+    compute_raw_extra,
+    extract_microc_contacts,
+    load_genomic_intervals,
+)
 
 
 def neighbourhood_bio(dhs: np.ndarray, k27: np.ndarray, gene: np.ndarray, cell: np.ndarray) -> np.ndarray:
     """Leave-one-out neighbourhood summary, computed per cell type.
 
     Columns match ``ctx_feats.npz['bio']``:
-    mean accessibility of the gene's other elements, fraction of those with
-    accessibility > 1, mean H3K27ac, and max H3K27ac minus the row's own value.
+      0: mean accessibility (log1p(log1p(DHS.RPM)) legacy scale) of gene's other tested elements
+      1: fraction of other tested elements with value > 1
+      2: mean H3K27ac of gene's other tested elements (ChIP mark; excluded from P1_no_marks)
+      3: max(H3K27ac across gene's tested elements) - own H3K27ac (ChIP mark; excluded from P1_no_marks)
     """
     dhs = np.asarray(dhs, dtype=np.float64)
     k27 = np.asarray(k27, dtype=np.float64)
@@ -86,6 +79,9 @@ def main(argv=None) -> int:
     p.add_argument("--raw-tsv", required=True)
     p.add_argument("--ctx", required=True)
     p.add_argument("--expr", required=True)
+    p.add_argument("--tss", required=True)
+    p.add_argument("--ccre", required=True)
+    p.add_argument("--hic", required=True)
     p.add_argument("--out", default="data/fullbio/heldout_5ct.npz")
     args = p.parse_args(argv)
 
@@ -99,16 +95,20 @@ def main(argv=None) -> int:
         raise SystemExit(f"row mismatch: raw={len(raw)} meta={len(meta)} x={len(X)}")
     gene = meta["gene"].astype(str).to_numpy()
     if not np.array_equal(raw["measuredGeneSymbol"].astype(str).to_numpy(), gene):
-        raise SystemExit("measuredGeneSymbol and meta.gene disagree; the tables are not row-aligned")
+        raise SystemExit("measuredGeneSymbol and meta.gene disagree; tables are not row-aligned")
     if not np.allclose(np.abs(raw["distanceToTSS"].to_numpy(float)), meta["d"].to_numpy(float)):
-        raise SystemExit("distanceToTSS and meta.d disagree; the tables are not row-aligned")
+        raise SystemExit("distanceToTSS and meta.d disagree; tables are not row-aligned")
     y = meta["y"].to_numpy(np.int8)
     if not np.array_equal(raw["Regulated"].astype(bool).to_numpy(), y.astype(bool)):
         raise SystemExit("Regulated and meta.y disagree")
 
+    expected_atac = np.log1p(np.clip(raw["DHS.RPM"].to_numpy(float), 0.0, None))
+    if not np.allclose(meta["atac"].to_numpy(float), expected_atac, atol=1e-4):
+        raise SystemExit("meta.atac does not equal log1p(DHS.RPM); check upstream builder")
+
     cell = np.asarray(raw["CellType"].astype(str).tolist(), dtype="U")
     dhs = np.log1p(meta["atac"].to_numpy(np.float64))
-    k27 = X[:, 2].astype(np.float64)  # H3K27ac RPM, the design column ctx_eval uses
+    k27 = X[:, 2].astype(np.float64)
     bio = neighbourhood_bio(dhs, k27, gene, cell)
 
     gc = pd.read_csv(args.ctx).set_index("gene")
@@ -117,6 +117,11 @@ def main(argv=None) -> int:
 
     expr = pd.read_csv(args.expr).set_index("gene")["log_expr"]
     ev = expr.reindex(gene).to_numpy(np.float32)
+
+    tss_map, ccre_map = load_genomic_intervals(args.tss, args.ccre)
+    raw_extra = compute_raw_extra(raw)
+    genomic_ctx = compute_genomic_ctx(raw, tss_map, ccre_map)
+    contact_3d = extract_microc_contacts(raw, args.hic)
 
     os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
     np.savez_compressed(
@@ -128,6 +133,9 @@ def main(argv=None) -> int:
         expr=ev,
         atac=meta["atac"].to_numpy(np.float32),
         dist=meta["d"].to_numpy(np.float64),
+        raw_extra=raw_extra,
+        genomic_ctx=genomic_ctx,
+        contact_3d=contact_3d,
         y=y,
         chrom=np.asarray(raw["chrom"].astype(str).tolist(), dtype="U"),
         gene=np.asarray(gene.tolist(), dtype="U"),
@@ -143,6 +151,7 @@ def main(argv=None) -> int:
                 "cells": {k: int(v) for k, v in sorted(run.items())},
                 "gene_ctx_missing": int(np.isnan(gene_ctx).any(1).sum()),
                 "expr_missing": int(np.isnan(ev).sum()),
+                "mc_10kb_nonzero": round(float((contact_3d[:, 1] > 0).mean()), 4),
             }
         )
     )

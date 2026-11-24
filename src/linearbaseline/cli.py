@@ -93,21 +93,22 @@ def cmd_fullbio(args: argparse.Namespace) -> int:
     with open(outdir / "fullbio_loco.json", "w", encoding="utf-8", newline="\n") as handle:
         json.dump(payload, handle, indent=2, default=float)
 
-    header = f"{'arm':<18}{'AP':>8}{'95% CI':>20}{'AUC':>8}{'<20kb':>8}{'20-100kb':>10}{'100kb-1Mb':>11}"
+    header = f"{'arm':<20}{'AP':>8}{'95% CI':>20}{'AUC':>8}{'<20kb':>8}{'20-100kb':>10}{'100kb-1Mb':>11}{'>=1Mb':>8}"
     print(header)
-    for name in ("P0_full_bio", "P1_no_marks", "D0_distance_only"):
+    arm_order = [k for k in ("P2_full_bio_3d", "P0_full_bio", "P0_nobio", "P1_no_marks", "P1_no_marks_nobio", "D0_distance_only") if k in arms]
+    for name in arm_order:
         a = arms[name]["all"]
         ci = f"[{a['ap_ci_low']:.4f},{a['ap_ci_high']:.4f}]"
         row = [a["ap"], a["auc"]]
-        for label in ("<20kb", "20-100kb", "100kb-1Mb"):
+        for label in ("<20kb", "20-100kb", "100kb-1Mb", ">=1Mb"):
             row.append(arms[name].get(label, {}).get("ap", float("nan")))
-        print(f"{name:<18}{row[0]:>8.4f}{ci:>20}{row[1]:>8.4f}{row[2]:>8.4f}{row[3]:>10.4f}{row[4]:>11.4f}")
-    for name in ("P0_full_bio", "P1_no_marks"):
+        print(f"{name:<20}{row[0]:>8.4f}{ci:>20}{row[1]:>8.4f}{row[2]:>8.4f}{row[3]:>10.4f}{row[4]:>11.4f}{row[5]:>8.4f}")
+    for name in [k for k in ("P2_full_bio_3d", "P0_full_bio", "P1_no_marks") if k in arms]:
         bits = []
         for t in (0.90, 0.95):
             r = _at_threshold(arms[name]["all"], t)
             bits.append(f"p>={t:.2f}: {r['flagged']} calls, prec {r['precision']:.3f}, rec {r['recall']:.3f}")
-        print(f"{name:<18}" + "  |  ".join(bits))
+        print(f"{name:<20}" + "  |  ".join(bits))
     print(f"wrote {outdir / 'fullbio_loco.json'}")
     return 0
 
@@ -167,14 +168,15 @@ def cmd_transfer(args: argparse.Namespace) -> int:
     with open(outdir / "heldout_transfer.json", "w", encoding="utf-8", newline="\n") as handle:
         json.dump(payload, handle, indent=2, default=float)
 
-    header = f"{'arm':<14}{'cell':<9}{'n':>6}{'pos':>5}{'AP':>8}{'c@90':>6}{'p@90':>7}{'c@95':>6}{'p@95':>7}"
+    header = f"{'arm':<18}{'stratum':<11}{'n':>6}{'pos':>5}{'AP':>8}{'c@90':>6}{'p@90':>7}{'c@95':>6}{'p@95':>7}"
     print(header)
-    for name in ("P0_full_bio", "P1_no_marks"):
-        for label, cell_summary in arms[name]["cells"].items():
-            a = cell_summary["all"]
-            r90, r95 = _at_threshold(a, 0.90), _at_threshold(a, 0.95)
+    for name in [k for k in ("P2_full_bio_3d", "P0_full_bio", "P0_nobio", "P1_no_marks", "P1_no_marks_nobio") if k in arms]:
+        for sname, sdict in [("all5", arms[name]["all"]), ("4-non-K562", arms[name].get("non_k562", {}).get("all"))]:
+            if sdict is None:
+                continue
+            r90, r95 = _at_threshold(sdict, 0.90), _at_threshold(sdict, 0.95)
             print(
-                f"{name:<14}{label:<9}{a['n']:>6}{a['pos']:>5}{a['ap']:>8.4f}"
+                f"{name:<18}{sname:<11}{sdict['n']:>6}{sdict['pos']:>5}{sdict['ap']:>8.4f}"
                 f"{r90['flagged']:>6}{r90['precision']:>7.3f}{r95['flagged']:>6}{r95['precision']:>7.3f}"
             )
     print(f"wrote {outdir / 'heldout_transfer.json'}")

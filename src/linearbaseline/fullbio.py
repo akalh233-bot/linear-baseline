@@ -1,24 +1,16 @@
 """Full-bio logistic baseline on EPCrisprBenchmark (K562, CRE->gene).
 
-This is the repository's arm: a 26-column logistic regression that is the
-honest floor for CRE->gene prediction on the Gasperini/Fulco EPCrispr
-benchmark.  Everything about it is deliberately plain -- standardised features,
-in-fold PCA for the motif block, leave-one-chromosome-out CV -- so that the
-number it produces (AP 0.6715) can be audited column by column.
+v0.4.0 incorporates the P0 correctness fixes (true zero-ChIP P1 ablation,
+single log1p(DHS.RPM), strict in-fold expression standardization, scaled
+in-fold motif PCA, complete distance bins including >=1 Mb, and explicit
+4-non-K562 transfer reporting), P1 label-free genomic/epigenomic upgrades
+(raw TSV percentiles/expandedRegion/orientation/width + pure hg38 pair-level
+intervening TSS/cCRE and genome-wide power-law cCRE competition), and P2
+K562 Micro-C 3D contact features (5/10/25 kb VC_SQRT-balanced + O/E).
 
-Design matrix, in order::
-
-    logd, logd2                                  distance to TSS, scaled
-    motif_pca1..4                                in-fold PCA of 128 JASPAR scores
-    log_atac                                     log1p(DHS RPM)
-    bio1..4                                      neighbourhood chromatin summary
-    gene_ctx1..5                                 gene-side context (rE2G bed)
-    expr_prior                                   log expression prior (Gasperini GLM)
-    h3k27ac, h3k27ac_pct, ctcf, h3k4me1, h3k27me3,
-    h3k27ac_peak, ctcf_peak, h3k4me1_peak, h3k27me3_peak
-
-The last nine columns are *measured* marks: dropping them ("no marks" arm) costs
-0.0208 AP, which is the deployability price of not having ChIP data.
+All fitted quantities (motif scaler + PCA-4, gene-context medians, expression
+median/mean/std, design-matrix standardization, logistic weights) are estimated
+strictly on training chromosomes (LOCO) or K562 (zero-shot transfer).
 """
 
 from __future__ import annotations
@@ -30,7 +22,13 @@ from sklearn.decomposition import PCA
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import average_precision_score, roc_auc_score
 
-from .metrics import DEFAULT_THRESHOLDS, bootstrap_ap_ci, calibration, threshold_table
+from .metrics import (
+    DEFAULT_THRESHOLDS,
+    bootstrap_ap_ci,
+    calibration,
+    paired_bootstrap_delta_ap,
+    threshold_table,
+)
 
 # Column indices inside `base12` (the 12 raw EPCrispr design columns).
 MARK_CONT: Tuple[int, ...] = (2, 4, 5, 6)  # h3k27ac, ctcf, h3k4me1, h3k27me3
@@ -43,25 +41,88 @@ BASE12_NAMES: Tuple[str, ...] = (
     "h3k27me3", "h3k27ac_peak", "ctcf_peak", "h3k4me1_peak",
     "h3k27me3_peak", "ubiq_expr",
 )
-
 MARK_NAMES: Tuple[str, ...] = tuple(BASE12_NAMES[i] for i in MARK_ALL)
+
+# `bio` columns: first 2 are DHS-only, last 2 are measured H3K27ac (ChIP!).
+BIO_NAMES: Tuple[str, ...] = (
+    "bio_dhs_mean",
+    "bio_dhs_frac_gt1",
+    "bio_h3k27ac_mean",
+    "bio_h3k27ac_max_minus_own",
+)
+BIO_NOCHIP_IDX: Tuple[int, ...] = (0, 1)
+BIO_ALL_IDX: Tuple[int, ...] = (0, 1, 2, 3)
+
+# `raw_extra` columns: first 3 are ChIP-free, last 2 are expandedRegion H3K27ac (ChIP!).
+RAW_EXTRA_NAMES: Tuple[str, ...] = (
+    "dhs_pct",
+    "is_upstream",
+    "log_width",
+    "h3k27ac_exp",
+    "h3k27ac_exp_pct",
+)
+RAW_EXTRA_NOCHIP_IDX: Tuple[int, ...] = (0, 1, 2)
+RAW_EXTRA_ALL_IDX: Tuple[int, ...] = (0, 1, 2, 3, 4)
+
+# `genomic_ctx`: 7 pure hg38 genomic-topology features (zero ChIP, screen-independent).
+GENOMIC_CTX_NAMES: Tuple[str, ...] = (
+    "log_int_tss",
+    "log_int_ccre",
+    "log_ccre_5kb",
+    "log_ccre_50kb",
+    "log_tss_50kb",
+    "log_gw_ccre_sum",
+    "log_gw_ccre_share",
+)
+
+# `contact_3d`: 4 VC_SQRT-balanced K562 Micro-C 3D contact features (zero ChIP).
+CONTACT_3D_NAMES: Tuple[str, ...] = (
+    "mc_5kb",
+    "mc_10kb",
+    "mc_10kb_oe",
+    "mc_25kb_oe",
+)
+
+CHIP_FEATURE_NAMES: frozenset[str] = frozenset(
+    list(MARK_NAMES) + ["bio_h3k27ac_mean", "bio_h3k27ac_max_minus_own", "h3k27ac_exp", "h3k27ac_exp_pct"]
+)
 
 DISTANCE_BINS: Tuple[Tuple[str, float, float], ...] = (
     ("<20kb", 0.0, 20e3),
     ("20-100kb", 20e3, 100e3),
     ("100kb-1Mb", 100e3, 1e6),
+    (">=1Mb", 1e6, float("inf")),
 )
 
 
-def feature_names(n_pca: int = 4, with_marks: bool = True) -> List[str]:
+def feature_names(
+    n_pca: int = 4,
+    with_marks: bool = True,
+    with_bio: bool = True,
+    with_raw_extra: bool = True,
+    with_genomic_ctx: bool = True,
+    with_3d: bool = False,
+) -> List[str]:
     names = ["logd", "logd2"]
     names += [f"motif_pca{i + 1}" for i in range(n_pca)]
     names += ["log_atac"]
-    names += [f"bio{i + 1}" for i in range(4)]
+    if with_bio:
+        bio_idx = BIO_ALL_IDX if with_marks else BIO_NOCHIP_IDX
+        names += [BIO_NAMES[i] for i in bio_idx]
     names += [f"gene_ctx{i + 1}" for i in range(5)]
     names += ["expr_prior"]
     if with_marks:
         names += list(MARK_NAMES)
+    if with_raw_extra:
+        rx_idx = RAW_EXTRA_ALL_IDX if with_marks else RAW_EXTRA_NOCHIP_IDX
+        names += [RAW_EXTRA_NAMES[i] for i in rx_idx]
+    if with_genomic_ctx:
+        names += list(GENOMIC_CTX_NAMES)
+    if with_3d:
+        names += list(CONTACT_3D_NAMES)
+    if not with_marks:
+        leaked = CHIP_FEATURE_NAMES.intersection(names)
+        assert not leaked, f"ChIP mark features leaked into zero-ChIP arm: {sorted(leaked)}"
     return names
 
 
@@ -71,9 +132,14 @@ def load_fullbio(path: str) -> Dict[str, np.ndarray]:
     out = {k: z[k] for k in z.files}
     for key in ("base12", "motif", "bio", "gene_ctx", "expr", "atac", "dist"):
         out[key] = out[key].astype(np.float64)
+    for opt_key in ("raw_extra", "genomic_ctx", "contact_3d"):
+        if opt_key in out:
+            out[opt_key] = out[opt_key].astype(np.float64)
     out["y"] = out["y"].astype(int)
     out["chrom"] = out["chrom"].astype(str)
     out["gene"] = out["gene"].astype(str)
+    # Retained for backwards compatibility only; loco_oof and fit_transfer
+    # ALWAYS fit expression median/mean/std strictly on training rows.
     out["exprz"] = _expression_prior(out["expr"])
     return out
 
@@ -84,55 +150,111 @@ def _expression_prior(
     ref_std: Optional[float] = None,
     fill: Optional[float] = None,
 ) -> np.ndarray:
-    """Z-scored log-expression prior.
-
-    When ``ref_mean``/``ref_std`` are given (cross-cell-line transfer) the
-    reference statistics of the *training* cell line are applied, so the test
-    cell line's own expression mean never leaks into the features.  With no
-    reference the array is standardised on its own rows, which is what
-    :func:`load_fullbio` does for the packaged K562 table.  ``fill`` imputes
-    missing genes (the training median is the right choice in transfer).
-    """
+    """Z-scored log-expression prior, imputed and standardized from reference stats."""
     ev = np.asarray(expr, dtype=np.float64).copy()
-    ev = np.where(np.isfinite(ev), ev, np.nanmedian(ev) if fill is None else fill)
+    fill_val = float(np.nanmedian(ev)) if fill is None else float(fill)
+    if not np.isfinite(fill_val):
+        fill_val = 0.0
+    ev = np.where(np.isfinite(ev), ev, fill_val)
     if ref_mean is None or ref_std is None:
         return (ev - ev.mean()) / (ev.std() + 1e-9)
     return (ev - ref_mean) / (ref_std + 1e-9)
 
 
 def _fill_gene_ctx(gene_ctx: np.ndarray, medians: Optional[np.ndarray] = None) -> Tuple[np.ndarray, np.ndarray]:
-    """Median-impute the gene-side block; medians can come from a training set."""
+    """Median-impute the gene-side block; medians always come from training rows."""
     gf = np.asarray(gene_ctx, dtype=np.float64).copy()
     if medians is None:
         medians = np.array([np.nanmedian(gf[:, j]) for j in range(gf.shape[1])])
     medians = np.asarray(medians, dtype=np.float64).copy()
     if not np.isfinite(medians).all():
-        # A column that is entirely missing in the training rows cannot be
-        # imputed from them; fall back to 0.0, the mean of the standardised
-        # training block, and let the logistic weight decide what it is worth.
         medians = np.where(np.isfinite(medians), medians, 0.0)
     for j in range(gf.shape[1]):
         gf[~np.isfinite(gf[:, j]), j] = medians[j]
     return gf, medians
 
 
-def _assemble(
-    d: Dict[str, np.ndarray],
-    motif_pca: np.ndarray,
-    gene_ctx: np.ndarray,
-    with_marks: bool,
-) -> np.ndarray:
-    cols = [
-        d["base12"][:, 0:2],
-        motif_pca,
-        np.log1p(d["atac"])[:, None],
-        d["bio"],
-        gene_ctx,
-        d["exprz"][:, None],
-    ]
-    if with_marks:
-        cols.append(d["base12"][:, MARK_ALL])
-    return np.column_stack(cols)
+def _fit_transform_pair(
+    tr: Dict[str, np.ndarray],
+    te: Dict[str, np.ndarray],
+    *,
+    n_pca: int = 4,
+    with_marks: bool = True,
+    with_bio: bool = True,
+    with_raw_extra: bool = True,
+    with_genomic_ctx: bool = True,
+    with_3d: bool = False,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Fit every preprocessing step on `tr` ONLY and transform both `tr` and `te`."""
+    # Check optional keys availability cleanly
+    use_rx = with_raw_extra and ("raw_extra" in tr) and ("raw_extra" in te)
+    use_gc = with_genomic_ctx and ("genomic_ctx" in tr) and ("genomic_ctx" in te)
+    use_3d = with_3d and ("contact_3d" in tr) and ("contact_3d" in te)
+
+    # 1) Scaled motif PCA fitted strictly on `tr`
+    m_mu = tr["motif"].mean(0)
+    m_sd = tr["motif"].std(0) + 1e-9
+    m_tr_s = (tr["motif"] - m_mu) / m_sd
+    m_te_s = (te["motif"] - m_mu) / m_sd
+    pca = PCA(n_components=n_pca, random_state=0).fit(m_tr_s)
+    mot_tr = pca.transform(m_tr_s).astype(np.float64)
+    mot_te = pca.transform(m_te_s).astype(np.float64)
+
+    # 2) Gene-context median imputation fitted strictly on `tr`
+    tr_med = np.array([np.nanmedian(tr["gene_ctx"][:, j]) for j in range(tr["gene_ctx"].shape[1])])
+    gc_tr, _ = _fill_gene_ctx(tr["gene_ctx"], medians=tr_med)
+    gc_te, _ = _fill_gene_ctx(te["gene_ctx"], medians=tr_med)
+
+    # 3) Expression prior median/mean/std fitted strictly on `tr`
+    ev_tr = np.asarray(tr["expr"], dtype=np.float64)
+    med_e = float(np.nanmedian(ev_tr))
+    if not np.isfinite(med_e):
+        med_e = 0.0
+    ev_tr_f = np.where(np.isfinite(ev_tr), ev_tr, med_e)
+    e_mean, e_std = float(ev_tr_f.mean()), float(ev_tr_f.std())
+    ez_tr = _expression_prior(tr["expr"], ref_mean=e_mean, ref_std=e_std, fill=med_e)
+    ez_te = _expression_prior(te["expr"], ref_mean=e_mean, ref_std=e_std, fill=med_e)
+
+    def _assemble_one(d: Dict[str, np.ndarray], mot: np.ndarray, gc: np.ndarray, ez: np.ndarray) -> np.ndarray:
+        # `d["atac"]` is already log1p(DHS.RPM) from upstream build_epcrispr.py; do NOT double-log!
+        cols = [d["base12"][:, 0:2], mot, d["atac"][:, None]]
+        if with_bio:
+            bio_idx = BIO_ALL_IDX if with_marks else BIO_NOCHIP_IDX
+            cols.append(d["bio"][:, list(bio_idx)])
+        cols.append(gc)
+        cols.append(ez[:, None])
+        if with_marks:
+            cols.append(d["base12"][:, MARK_ALL])
+        if use_rx:
+            rx_idx = RAW_EXTRA_ALL_IDX if with_marks else RAW_EXTRA_NOCHIP_IDX
+            cols.append(d["raw_extra"][:, list(rx_idx)])
+        if use_gc:
+            cols.append(d["genomic_ctx"])
+        if use_3d:
+            cols.append(d["contact_3d"])
+        return np.column_stack(cols)
+
+    expected_cols = feature_names(
+        n_pca=n_pca,
+        with_marks=with_marks,
+        with_bio=with_bio,
+        with_raw_extra=use_rx,
+        with_genomic_ctx=use_gc,
+        with_3d=use_3d,
+    )
+    F_tr = _assemble_one(tr, mot_tr, gc_tr, ez_tr)
+    F_te = _assemble_one(te, mot_te, gc_te, ez_te)
+    assert F_tr.shape[1] == len(expected_cols), f"column mismatch: {F_tr.shape[1]} vs {len(expected_cols)}"
+
+    # 4) Design-matrix standardization fitted strictly on `tr`
+    mu = F_tr.mean(0)
+    sd = F_tr.std(0) + 1e-9
+    return (F_tr - mu) / sd, (F_te - mu) / sd
+
+
+def _subset(d: Dict[str, np.ndarray], mask: np.ndarray) -> Dict[str, np.ndarray]:
+    n = len(mask)
+    return {k: (v[mask] if isinstance(v, np.ndarray) and len(v) == n else v) for k, v in d.items()}
 
 
 def loco_oof(
@@ -140,36 +262,36 @@ def loco_oof(
     C: float = 1.0,
     n_pca: int = 4,
     with_marks: bool = True,
+    with_bio: bool = True,
+    with_raw_extra: bool = True,
+    with_genomic_ctx: bool = True,
+    with_3d: bool = False,
     max_iter: int = 400,
 ) -> np.ndarray:
     """Leave-one-chromosome-out out-of-fold probabilities.
 
-    All fitted objects (PCA, gene-context medians, mean/std, logistic weights)
-    are estimated on the training chromosomes only, so the held-out chromosome
-    never touches a fitted statistic.
+    All fitted objects (motif scaler/PCA, gene-context medians, expression
+    median/mean/std, design standardization, logistic weights) are estimated on
+    the 22 training chromosomes only.
     """
     y = d["y"]
     chrom = d["chrom"]
-    motif = d["motif"]
-    gene_ctx = d["gene_ctx"].astype(np.float64).copy()
-
     preds = np.full(len(y), np.nan, dtype=np.float64)
     for c in np.unique(chrom):
         te = chrom == c
         tr = ~te
-
-        pca = PCA(n_components=n_pca, random_state=0).fit(motif[tr])
-        motif_pca = pca.transform(motif).astype(np.float64)
-
-        medians = np.array([np.nanmedian(gene_ctx[tr, j]) for j in range(gene_ctx.shape[1])])
-        gf, _ = _fill_gene_ctx(gene_ctx, medians=medians)
-
-        F = _assemble(d, motif_pca, gf, with_marks)
-        mu = F[tr].mean(0)
-        sd = F[tr].std(0) + 1e-9
-        Z = (F - mu) / sd
-        lr = LogisticRegression(C=C, max_iter=max_iter).fit(Z[tr], y[tr])
-        preds[te] = lr.predict_proba(Z[te])[:, 1]
+        Z_tr, Z_te = _fit_transform_pair(
+            _subset(d, tr),
+            _subset(d, te),
+            n_pca=n_pca,
+            with_marks=with_marks,
+            with_bio=with_bio,
+            with_raw_extra=with_raw_extra,
+            with_genomic_ctx=with_genomic_ctx,
+            with_3d=with_3d,
+        )
+        lr = LogisticRegression(C=C, max_iter=max_iter).fit(Z_tr, y[tr])
+        preds[te] = lr.predict_proba(Z_te)[:, 1]
     if not np.isfinite(preds).all():
         raise RuntimeError("some rows were never held out; check the chromosome column")
     return preds
@@ -198,42 +320,25 @@ def fit_transfer(
     C: float = 1.0,
     n_pca: int = 4,
     with_marks: bool = True,
+    with_bio: bool = True,
+    with_raw_extra: bool = True,
+    with_genomic_ctx: bool = True,
+    with_3d: bool = False,
     max_iter: int = 400,
 ) -> np.ndarray:
-    """Fit the full-bio model on one cell line, score a *different* cell line.
-
-    Everything fitted -- PCA, gene-context medians, expression centring,
-    standardisation, logistic weights -- is estimated on ``train`` only; the
-    test cell line contributes raw columns and nothing else.  This is the
-    zero-shot transfer protocol: the labels of the target cell type are never
-    touched, so the resulting probabilities can be thresholded and scored.
-
-    The test table must carry the same keys as :func:`load_fullbio` (``base12``,
-    ``motif``, ``bio``, ``gene_ctx``, ``expr``, ``atac``, ``dist``, ``y``,
-    ``chrom``, ``gene``); ``cell`` is used only by :func:`run_transfer` and is
-    not needed here.
-    """
-    motif_pca_train = PCA(n_components=n_pca, random_state=0).fit(train["motif"])
-    motif_train = motif_pca_train.transform(train["motif"]).astype(np.float64)
-    motif_test = motif_pca_train.transform(test["motif"]).astype(np.float64)
-
-    train_medians = np.array([np.nanmedian(train["gene_ctx"][:, j]) for j in range(train["gene_ctx"].shape[1])])
-    train_gc, _ = _fill_gene_ctx(train["gene_ctx"], medians=train_medians)
-    test_gc, _ = _fill_gene_ctx(test["gene_ctx"], medians=train_medians)
-
-    train_expr = np.asarray(train["expr"], dtype=np.float64)
-    train_expr = np.where(np.isfinite(train_expr), train_expr, np.nanmedian(train_expr))
-    expr_mean, expr_std = float(train_expr.mean()), float(train_expr.std())
-    test_exprz = _expression_prior(test["expr"], ref_mean=expr_mean, ref_std=expr_std, fill=float(np.nanmedian(train_expr)))
-
-    F_train = _assemble(train, motif_train, train_gc, with_marks)
-    test_view = {**test, "exprz": test_exprz}
-    F_test = _assemble(test_view, motif_test, test_gc, with_marks)
-
-    mu = F_train.mean(0)
-    sd = F_train.std(0) + 1e-9
-    lr = LogisticRegression(C=C, max_iter=max_iter).fit((F_train - mu) / sd, train["y"])
-    return lr.predict_proba((F_test - mu) / sd)[:, 1]
+    """Fit on `train` only and score `test` zero-shot (target labels untouched)."""
+    Z_train, Z_test = _fit_transform_pair(
+        train,
+        test,
+        n_pca=n_pca,
+        with_marks=with_marks,
+        with_bio=with_bio,
+        with_raw_extra=with_raw_extra,
+        with_genomic_ctx=with_genomic_ctx,
+        with_3d=with_3d,
+    )
+    lr = LogisticRegression(C=C, max_iter=max_iter).fit(Z_train, train["y"])
+    return lr.predict_proba(Z_test)[:, 1]
 
 
 def _summarize_transfer_stratum(
@@ -246,13 +351,6 @@ def _summarize_transfer_stratum(
     thresholds: Sequence[float],
     min_pos: int = 20,
 ) -> Dict:
-    """Summarize one stratum, with a gene bootstrap only if it can be trusted.
-
-    Small target cell types (7-16 positives) cannot support a 1,000-resample
-    gene bootstrap -- resamples without both classes are skipped and the
-    interval degenerates.  Below ``min_pos`` positives the point AP is reported
-    without an interval rather than a misleading one.
-    """
     y = np.asarray(y)
     if int(y.sum()) >= min_pos:
         return summarize(y, score, dist, cluster=gene, n_boot=n_boot, seed=seed, thresholds=thresholds)
@@ -268,19 +366,44 @@ def run_transfer(
     thresholds: Sequence[float] = DEFAULT_THRESHOLDS,
     verbose: bool = True,
 ) -> Dict[str, Dict]:
-    """Zero-shot cross-cell-line arms: K562-trained P0 and P1 on held-out types.
+    """Zero-shot cross-cell-line arms on the five held-out cell types.
 
-    Returns the same shape as :func:`run_arms` (``P0_full_bio``, ``P1_no_marks``,
-    ``delta_marks``) plus a ``cells`` mapping inside each arm.  ``test["cell"]``
-    is required and is the cell line of each held-out pair.
+    Reports ``all`` (all 5 cell types), ``non_k562`` (the 4 genuinely held-out
+    non-K562 cell types, excluding in-domain K562), and each cell type
+    individually, plus paired gene-cluster bootstrap CIs for ``delta_marks``
+    and ``delta_3d``.
     """
     cell = np.asarray(test["cell"]).astype(str)
+    non_k562 = cell != "K562"
+    has_3d = ("contact_3d" in train) and ("contact_3d" in test)
+
+    arm_specs: List[Tuple[str, Dict]] = [
+        ("P0_full_bio", dict(with_marks=True, with_bio=True, with_3d=False)),
+        ("P0_nobio", dict(with_marks=True, with_bio=False, with_3d=False)),
+        ("P1_no_marks", dict(with_marks=False, with_bio=True, with_3d=False)),
+        ("P1_no_marks_nobio", dict(with_marks=False, with_bio=False, with_3d=False)),
+    ]
+    if has_3d:
+        arm_specs.insert(0, ("P2_full_bio_3d", dict(with_marks=True, with_bio=True, with_3d=True)))
+
     arms: Dict[str, Dict] = {}
-    for name, with_marks in (("P0_full_bio", True), ("P1_no_marks", False)):
-        preds = fit_transfer(train, test, C=C, with_marks=with_marks)
+    pred_map: Dict[str, np.ndarray] = {}
+    for name, kw in arm_specs:
+        preds = fit_transfer(train, test, C=C, **kw)
+        pred_map[name] = preds
         summary = _summarize_transfer_stratum(
             test["y"], preds, test["dist"], test["gene"], n_boot, seed, thresholds
         )
+        if non_k562.any() and test["y"][non_k562].min() != test["y"][non_k562].max():
+            summary["non_k562"] = _summarize_transfer_stratum(
+                test["y"][non_k562],
+                preds[non_k562],
+                test["dist"][non_k562],
+                test["gene"][non_k562],
+                n_boot,
+                seed,
+                thresholds,
+            )
         summary["cells"] = {}
         for label in sorted(np.unique(cell)):
             m = cell == label
@@ -290,19 +413,52 @@ def run_transfer(
         arms[name] = summary
         if verbose:
             a = summary["all"]
-            print(f"{name:16s} transfer AP {a['ap']:.4f}  n={a['n']}  pos={a['pos']}")
-            for label, cell_summary in summary["cells"].items():
-                c = cell_summary["all"]
-                at_90 = min(c["thresholds"], key=lambda r: abs(r["threshold"] - 0.90))
-                print(
-                    f"    {label:8s} AP {c['ap']:.4f}  n={c['n']:5d} pos={c['pos']:4d}"
-                    f"  calls@0.90={at_90['flagged']:4d} prec={at_90['precision']:.3f}"
-                )
-    arms["delta_marks"] = {"all": arms["P0_full_bio"]["all"]["ap"] - arms["P1_no_marks"]["all"]["ap"]}
-    arms["delta_marks"]["cells"] = {
-        label: arms["P0_full_bio"]["cells"][label]["all"]["ap"] - arms["P1_no_marks"]["cells"][label]["all"]["ap"]
-        for label in arms["P0_full_bio"]["cells"]
+            nk = summary.get("non_k562", {}).get("all", {})
+            nk_str = f"  4-non-K562 AP {nk['ap']:.4f}" if nk else ""
+            print(f"{name:18s} transfer AP {a['ap']:.4f}{nk_str}  n={a['n']}  pos={a['pos']}")
+
+    arms["delta_marks"] = {
+        "all": arms["P0_full_bio"]["all"]["ap"] - arms["P1_no_marks"]["all"]["ap"],
+        "all_paired": paired_bootstrap_delta_ap(
+            test["y"], pred_map["P0_full_bio"], pred_map["P1_no_marks"], test["gene"], n_boot=n_boot, seed=seed
+        ),
+        "cells": {
+            label: arms["P0_full_bio"]["cells"][label]["all"]["ap"]
+            - arms["P1_no_marks"]["cells"][label]["all"]["ap"]
+            for label in arms["P0_full_bio"]["cells"]
+        },
     }
+    if non_k562.any() and int(test["y"][non_k562].sum()) >= 20:
+        arms["delta_marks"]["non_k562"] = (
+            arms["P0_full_bio"]["non_k562"]["all"]["ap"] - arms["P1_no_marks"]["non_k562"]["all"]["ap"]
+        )
+        arms["delta_marks"]["non_k562_paired"] = paired_bootstrap_delta_ap(
+            test["y"][non_k562],
+            pred_map["P0_full_bio"][non_k562],
+            pred_map["P1_no_marks"][non_k562],
+            test["gene"][non_k562],
+            n_boot=n_boot,
+            seed=seed,
+        )
+    if has_3d:
+        arms["delta_3d"] = {
+            "all": arms["P2_full_bio_3d"]["all"]["ap"] - arms["P0_full_bio"]["all"]["ap"],
+            "all_paired": paired_bootstrap_delta_ap(
+                test["y"], pred_map["P2_full_bio_3d"], pred_map["P0_full_bio"], test["gene"], n_boot=n_boot, seed=seed
+            ),
+        }
+        if non_k562.any() and int(test["y"][non_k562].sum()) >= 20:
+            arms["delta_3d"]["non_k562"] = (
+                arms["P2_full_bio_3d"]["non_k562"]["all"]["ap"] - arms["P0_full_bio"]["non_k562"]["all"]["ap"]
+            )
+            arms["delta_3d"]["non_k562_paired"] = paired_bootstrap_delta_ap(
+                test["y"][non_k562],
+                pred_map["P2_full_bio_3d"][non_k562],
+                pred_map["P0_full_bio"][non_k562],
+                test["gene"][non_k562],
+                n_boot=n_boot,
+                seed=seed,
+            )
     return arms
 
 
@@ -320,14 +476,7 @@ def summarize(
     seed: int = 7,
     thresholds: Sequence[float] = DEFAULT_THRESHOLDS,
 ) -> Dict:
-    """Overall + distance-binned AP, threshold call sets, and calibration.
-
-    ``thresholds`` is carried into every stratum so the near-field and distal
-    bins answer the same deployment question ("how many calls, how many true")
-    as the pooled arm.  Calibration (Brier, ECE, reliability bins) is reported
-    once, on the pooled rows, because the bins are too sparse per distance bin
-    to mean anything.
-    """
+    """Overall + distance-binned AP, threshold call sets, and calibration."""
     y = np.asarray(y)
     score = np.asarray(score)
     out: Dict = {
@@ -364,27 +513,51 @@ def run_arms(
     seed: int = 7,
     verbose: bool = True,
 ) -> Dict[str, Dict]:
-    """P0 (full bio) vs P1 (no marks) vs D0 (distance only)."""
-    arms: Dict[str, Dict] = {}
-    specs = (
-        ("P0_full_bio", lambda: loco_oof(d, C=C, with_marks=True)),
-        ("P1_no_marks", lambda: loco_oof(d, C=C, with_marks=False)),
+    """Run nested LOCO arms: P2 (+3D), P0 (full bio), P0_nobio, P1 (zero ChIP), P1_nobio, D0."""
+    has_3d = "contact_3d" in d
+    specs: List[Tuple[str, callable]] = [
+        ("P0_full_bio", lambda: loco_oof(d, C=C, with_marks=True, with_bio=True, with_3d=False)),
+        ("P0_nobio", lambda: loco_oof(d, C=C, with_marks=True, with_bio=False, with_3d=False)),
+        ("P1_no_marks", lambda: loco_oof(d, C=C, with_marks=False, with_bio=True, with_3d=False)),
+        ("P1_no_marks_nobio", lambda: loco_oof(d, C=C, with_marks=False, with_bio=False, with_3d=False)),
         ("D0_distance_only", lambda: loco_oof_distance(d, C=C)),
-    )
+    ]
+    if has_3d:
+        specs.insert(0, ("P2_full_bio_3d", lambda: loco_oof(d, C=C, with_marks=True, with_bio=True, with_3d=True)))
+
+    arms: Dict[str, Dict] = {}
+    pred_map: Dict[str, np.ndarray] = {}
     for name, fn in specs:
         preds = fn()
+        pred_map[name] = preds
         arms[name] = summarize(d["y"], preds, d["dist"], d["gene"], n_boot=n_boot, seed=seed)
         if verbose:
             a = arms[name]["all"]
-            print(f"{name:16s} AP {a['ap']:.4f} [{a.get('ap_ci_low', float('nan')):.4f}, {a.get('ap_ci_high', float('nan')):.4f}]")
+            print(f"{name:18s} AP {a['ap']:.4f} [{a.get('ap_ci_low', float('nan')):.4f}, {a.get('ap_ci_high', float('nan')):.4f}]")
             for label, _, _ in DISTANCE_BINS:
                 if label in arms[name]:
                     print(f"    {label:10s} AP {arms[name][label]['ap']:.4f}  n={arms[name][label]['n']}")
+
     arms["delta_marks"] = {
         "all": arms["P0_full_bio"]["all"]["ap"] - arms["P1_no_marks"]["all"]["ap"],
-        "note": "AP lost when the nine measured mark columns are removed",
+        "all_paired": paired_bootstrap_delta_ap(
+            d["y"], pred_map["P0_full_bio"], pred_map["P1_no_marks"], d["gene"], n_boot=n_boot, seed=seed
+        ),
+        "note": "AP lost when all measured ChIP marks (base12 marks, bio H3K27ac, expandedRegion H3K27ac) are removed",
     }
     for label, _, _ in DISTANCE_BINS:
         if label in arms["P0_full_bio"] and label in arms["P1_no_marks"]:
             arms["delta_marks"][label] = arms["P0_full_bio"][label]["ap"] - arms["P1_no_marks"][label]["ap"]
+
+    if has_3d:
+        arms["delta_3d"] = {
+            "all": arms["P2_full_bio_3d"]["all"]["ap"] - arms["P0_full_bio"]["all"]["ap"],
+            "all_paired": paired_bootstrap_delta_ap(
+                d["y"], pred_map["P2_full_bio_3d"], pred_map["P0_full_bio"], d["gene"], n_boot=n_boot, seed=seed
+            ),
+            "note": "AP gained on K562 LOCO by adding 4 VC_SQRT-balanced K562 Micro-C 3D contact features",
+        }
+        for label, _, _ in DISTANCE_BINS:
+            if label in arms["P2_full_bio_3d"] and label in arms["P0_full_bio"]:
+                arms["delta_3d"][label] = arms["P2_full_bio_3d"][label]["ap"] - arms["P0_full_bio"][label]["ap"]
     return arms
